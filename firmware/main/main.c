@@ -8,6 +8,7 @@
 #include "wake.h"
 #include "net.h"
 #include "ui.h"
+#include "touch.h"
 #include "config.h"
 
 static const char *TAG = "MAIN";
@@ -37,6 +38,12 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "net_init failed, will retry in background");
         ui_set_state(UI_STATE_ERROR);
+    }
+
+    // Touch controller (after ui_init which sets up I2C bus)
+    ret = touch_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "touch_init failed: %s (continuing without touch)", esp_err_to_name(ret));
     }
 
     ESP_LOGI(TAG, "All subsystems initialized");
