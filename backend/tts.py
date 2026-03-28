@@ -1,86 +1,121 @@
 """
-TTS module — calls Piper via subprocess, streams raw PCM output.
-Piper writes 16-bit LE mono PCM to stdout.
+TTS module — POSTs text to piper-server, receives WAV, yields raw PCM chunks.
+POST /synthesize  JSON: {"text":"...","voice":"lili"|"libritts","speaker_id":886}
+Returns: WAV bytes (22050 Hz for lili, 22050 Hz for libritts)
+Device expects: 16000 Hz 16-bit mono PCM
 """
-import asyncio
+import io
 import logging
-import shutil
-from typing import AsyncIterator
+import wave
+from typing import AsyncIterator, Optional
 
 log = logging.getLogger("TTS")
 
+try:
+    import aiohttp
+    _HAS_AIOHTTP = True
+except ImportError:
+    _HAS_AIOHTTP = False
+    log.warning("aiohttp not installed, TTS will be a stub")
+
 import config
 
-CHUNK_BYTES = 1024  # ~32ms @ 16kHz 16-bit mono
+CHUNK_SAMPLES = 800   # 50ms @ 16kHz
+CHUNK_BYTES   = CHUNK_SAMPLES * 2  # 16-bit
 
 
 class PiperTTS:
     def __init__(self):
-        self._piper_path = shutil.which(config.PIPER_BINARY) or config.PIPER_BINARY
+        self._session: Optional["aiohttp.ClientSession"] = None
 
-    async def synthesize(self, text: str, output_sample_rate: int = 16000) -> AsyncIterator[bytes]:
+    def _get_session(self) -> "aiohttp.ClientSession":
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def synthesize(self, text: str, lang: str = "sk",
+                         output_sample_rate: int = 16000) -> AsyncIterator[bytes]:
         """
-        Synthesize text to speech using Piper.
-        Yields raw PCM chunks (16-bit LE mono) suitable for sending to the device.
+        Synthesize text via piper-server.
+        Yields raw PCM chunks (16-bit LE mono, output_sample_rate Hz).
+        lang: 'sk' → voice=lili, otherwise → voice=libritts + speaker_id
         """
         if not text.strip():
             return
 
-        cmd = [
-            self._piper_path,
-            "--model",       config.PIPER_MODEL,
-            "--output-raw",
-            "--length-scale", "1.0",
-            "--sentence-silence", "0.1",
-        ]
-
-        log.debug("Piper cmd: %s", " ".join(cmd))
-        log.debug("TTS text: %r", text[:80])
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            log.error("Piper binary not found at: %s", self._piper_path)
+        if not _HAS_AIOHTTP:
+            log.warning("aiohttp unavailable, yielding stub PCM")
             yield _stub_pcm(text, output_sample_rate)
             return
 
-        # Feed text to piper stdin
-        stdin_data = (text + "\n").encode("utf-8")
-        proc.stdin.write(stdin_data)
-        await proc.stdin.drain()
-        proc.stdin.close()
+        if lang == "sk":
+            payload = {"text": text, "voice": config.PIPER_VOICE_SK}
+        else:
+            payload = {
+                "text":       text,
+                "voice":      config.PIPER_VOICE_EN,
+                "speaker_id": config.PIPER_SPEAKER_ID_EN,
+            }
 
-        # Stream stdout in chunks
+        url = f"{config.PIPER_SERVER_URL.rstrip('/')}/synthesize"
+        log.debug("TTS POST %s  voice=%s  text=%r", url, payload["voice"], text[:80])
+
+        session = self._get_session()
         try:
-            while True:
-                chunk = await proc.stdout.read(CHUNK_BYTES)
-                if not chunk:
-                    break
-                # Resample if piper output rate != device rate
-                if config.PIPER_SAMPLE_RATE != output_sample_rate:
-                    chunk = _resample_pcm(chunk, config.PIPER_SAMPLE_RATE, output_sample_rate)
-                if chunk:
-                    yield chunk
-        except asyncio.CancelledError:
-            proc.kill()
-            raise
+            async with session.post(url, json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    log.error("TTS request failed: HTTP %d — %s", resp.status, body[:200])
+                    return
+                wav_bytes = await resp.read()
+        except aiohttp.ClientError as e:
+            log.exception("TTS HTTP error: %s", e)
+            return
 
-        await proc.wait()
-        stderr_out = await proc.stderr.read()
-        if stderr_out:
-            log.debug("Piper stderr: %s", stderr_out.decode(errors="replace")[:200])
+        # Parse WAV header to get the native sample rate
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+                src_rate    = wf.getframerate()
+                n_channels  = wf.getnchannels()
+                sampwidth   = wf.getsampwidth()
+                pcm_bytes   = wf.readframes(wf.getnframes())
+        except Exception as e:
+            log.error("TTS WAV parse error: %s", e)
+            return
 
-        if proc.returncode != 0:
-            log.warning("Piper exited with code %d", proc.returncode)
+        log.debug("TTS WAV: rate=%d ch=%d width=%d pcm_bytes=%d",
+                  src_rate, n_channels, sampwidth, len(pcm_bytes))
+
+        # Convert to mono 16-bit if needed
+        if n_channels > 1 or sampwidth != 2:
+            try:
+                import numpy as np
+                samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+                if n_channels > 1:
+                    samples = samples.reshape(-1, n_channels).mean(axis=1).astype(np.int16)
+                pcm_bytes = samples.tobytes()
+            except Exception as e:
+                log.warning("TTS channel/depth conversion failed: %s", e)
+
+        # Resample to device rate if needed
+        if src_rate != output_sample_rate:
+            pcm_bytes = _resample_pcm(pcm_bytes, src_rate, output_sample_rate)
+
+        # Yield in fixed-size chunks
+        offset = 0
+        while offset < len(pcm_bytes):
+            chunk = pcm_bytes[offset:offset + CHUNK_BYTES]
+            if chunk:
+                yield chunk
+            offset += CHUNK_BYTES
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
 
 
 def _resample_pcm(pcm_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
-    """Simple linear resampling of 16-bit LE mono PCM."""
     try:
         import numpy as np
         import scipy.signal
@@ -93,7 +128,6 @@ def _resample_pcm(pcm_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
 
 
 def _stub_pcm(text: str, sample_rate: int) -> bytes:
-    """Return a short beep tone as PCM when Piper is unavailable."""
     import math
     import struct
     duration_s = min(len(text) * 0.05, 3.0)

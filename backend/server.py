@@ -11,7 +11,7 @@ import sys
 import config
 from session import Session
 from stt import WhisperSTT
-from llm import OpenClawLLM
+from llm import LlamaLLM
 from tts import PiperTTS
 
 logging.basicConfig(
@@ -25,7 +25,7 @@ log = logging.getLogger("SERVER")
 class HerVoiceServer:
     def __init__(self):
         self.stt = WhisperSTT()
-        self.llm = OpenClawLLM()
+        self.llm = LlamaLLM()
         self.tts = PiperTTS()
         # Per-device conversation history keyed by device_id
         self._histories: dict[int, list] = {}
@@ -38,7 +38,7 @@ class HerVoiceServer:
     def _get_history(self, device_id: int) -> list:
         if device_id not in self._histories:
             self._histories[device_id] = [
-                {"role": "system", "content": config.OPENCLAW_SYSTEM_PROMPT}
+                {"role": "system", "content": config.LLM_SYSTEM_PROMPT}
             ]
         return self._histories[device_id]
 

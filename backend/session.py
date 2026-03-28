@@ -3,7 +3,6 @@ Per-connection session state machine.
 Coordinates STT → LLM → TTS pipeline for one device session.
 """
 import asyncio
-import io
 import logging
 import time
 from enum import Enum, auto
@@ -20,13 +19,13 @@ log = logging.getLogger("SESSION")
 
 
 class SessionState(Enum):
-    INIT           = auto()
+    INIT            = auto()
     RECEIVING_AUDIO = auto()
-    STT            = auto()
-    LLM            = auto()
-    TTS            = auto()
-    DONE           = auto()
-    ERROR          = auto()
+    STT             = auto()
+    LLM             = auto()
+    TTS             = auto()
+    DONE            = auto()
+    ERROR           = auto()
 
 
 class Session:
@@ -39,13 +38,14 @@ class Session:
         self.tts     = tts
         self.history = conversation_history
 
-        self.state      = SessionState.INIT
-        self.device_id  = 0
-        self.sample_rate = config.DEFAULT_SAMPLE_RATE
-        self.audio_buf  = bytearray()
+        self.state       = SessionState.INIT
+        self.device_id   = 0
+        self.sample_rate = config.DEVICE_SAMPLE_RATE
+        self.audio_buf   = bytearray()
+        self.lang        = "sk"   # detected language, threaded through pipeline
 
         peer = writer.get_extra_info("peername")
-        self.peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
+        self.peer_str   = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         self.session_id = f"{self.peer_str}-{int(time.time())}"
 
     async def run(self) -> None:
@@ -60,10 +60,10 @@ class Session:
             log.info("[%s] Audio received in %.2fs, bytes=%d",
                      self.session_id, t_audio_done - t_start, len(self.audio_buf))
 
-            transcript = await self._run_stt()
+            transcript, self.lang = await self._run_stt()
             t_stt = time.perf_counter()
-            log.info("[%s] STT done in %.2fs: %r",
-                     self.session_id, t_stt - t_audio_done, transcript)
+            log.info("[%s] STT done in %.2fs: lang=%s %r",
+                     self.session_id, t_stt - t_audio_done, self.lang, transcript)
 
             if not transcript.strip():
                 log.warning("[%s] Empty transcript, skipping LLM/TTS", self.session_id)
@@ -100,7 +100,7 @@ class Session:
             raise ValueError(f"Expected Session Start (0x00), got 0x{frame_type:02x}")
         info = parse_session_start(payload)
         self.device_id   = info["device_id"]
-        self.sample_rate = info["sample_rate"] or config.DEFAULT_SAMPLE_RATE
+        self.sample_rate = info["sample_rate"] or config.DEVICE_SAMPLE_RATE
         log.info("[%s] device_id=0x%08X sample_rate=%d",
                  self.session_id, self.device_id, self.sample_rate)
 
@@ -119,27 +119,27 @@ class Session:
             elif frame_type == FRAME_PCM_UP_END:
                 break
             else:
-                log.warning("[%s] Unexpected frame 0x%02x during audio receive", self.session_id, frame_type)
+                log.warning("[%s] Unexpected frame 0x%02x during audio receive",
+                            self.session_id, frame_type)
 
-    async def _run_stt(self) -> str:
+    async def _run_stt(self) -> tuple[str, str]:
+        """Returns (transcript_text, language_code)."""
         self.state = SessionState.STT
         return await self.stt.transcribe(bytes(self.audio_buf), self.sample_rate)
 
     async def _run_llm(self, transcript: str) -> str:
         self.state = SessionState.LLM
         self.history.append({"role": "user", "content": transcript})
-        reply = await self.llm.complete(self.history)
+        reply = await self.llm.complete(self.history, lang=self.lang)
         self.history.append({"role": "assistant", "content": reply})
-        # Keep history bounded (last 10 turns)
+        # Keep history bounded (last 20 messages = 10 turns)
         if len(self.history) > 20:
             self.history = self.history[-20:]
         return reply
 
     async def _run_tts_and_stream(self, text: str) -> None:
         self.state = SessionState.TTS
-        CHUNK_BYTES = 1024  # ~32ms @ 16kHz 16-bit mono
-
-        async for chunk in self.tts.synthesize(text, self.sample_rate):
+        async for chunk in self.tts.synthesize(text, lang=self.lang,
+                                               output_sample_rate=self.sample_rate):
             await send_frame(self.writer, FRAME_PCM_DOWN, chunk)
-
         await send_frame(self.writer, FRAME_PCM_DOWN_END)

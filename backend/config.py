@@ -1,36 +1,37 @@
 import os
 
-# Server
+# ── TCP server (device connections) ────────────────────────────────────────
 HOST = os.getenv("HERVOICE_HOST", "0.0.0.0")
 PORT = int(os.getenv("HERVOICE_PORT", "8765"))
 
-# STT (faster-whisper)
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")    # or "cuda"
-WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8") # or "float16"
-WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", None) # None = auto-detect
-WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "")
+# ── STT — whisper-server (faster-whisper medium, CUDA float16) ─────────────
+# POST /transcribe  multipart: file=audio.wav, language=auto|sk|en
+# Returns: {"text":"...","language":"sk","duration":2.3}
+WHISPER_SERVER_URL = os.getenv("WHISPER_SERVER_URL", "http://127.0.0.1:15556")
 
-# LLM (OpenClaw / OpenAI-compatible)
-OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://192.168.1.35:11434/v1")
-OPENCLAW_API_KEY  = os.getenv("OPENCLAW_API_KEY", "nocreds")
-OPENCLAW_MODEL    = os.getenv("OPENCLAW_MODEL", "qwen2.5:3b")
-OPENCLAW_SYSTEM_PROMPT = os.getenv(
-    "OPENCLAW_SYSTEM_PROMPT",
-    "You are a helpful voice assistant. Keep your responses short and natural for speech."
+# ── LLM — llama-server (Qwen3.5-27B, OpenAI-compat) ───────────────────────
+LLM_SERVER_URL    = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8080")
+LLM_MODEL         = os.getenv("LLM_MODEL", "Qwen_Qwen3.5-27B-Q4_K_M.gguf")
+LLM_MAX_TOKENS    = int(os.getenv("LLM_MAX_TOKENS", "256"))
+LLM_TEMPERATURE   = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+LLM_SYSTEM_PROMPT = os.getenv(
+    "LLM_SYSTEM_PROMPT",
+    "You are a helpful voice assistant. Reply in plain text only, no markdown. "
+    "Keep responses short and natural for speech."
 )
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "256"))
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
-# TTS (Piper)
-PIPER_BINARY = os.getenv("PIPER_BINARY", "piper")
-PIPER_MODEL  = os.getenv("PIPER_MODEL", "/usr/share/piper/voices/en_US-lessac-medium.onnx")
-PIPER_SAMPLE_RATE = int(os.getenv("PIPER_SAMPLE_RATE", "16000"))
+# ── TTS — piper-server (models in RAM) ─────────────────────────────────────
+# POST /synthesize  JSON: {"text":"...","voice":"lili|libritts","speaker_id":886}
+# Returns: WAV bytes
+PIPER_SERVER_URL    = os.getenv("PIPER_SERVER_URL", "http://127.0.0.1:15555")
+PIPER_VOICE_SK      = os.getenv("PIPER_VOICE_SK", "lili")
+PIPER_VOICE_EN      = os.getenv("PIPER_VOICE_EN", "libritts")
+PIPER_SPEAKER_ID_EN = int(os.getenv("PIPER_SPEAKER_ID_EN", "886"))
 
-# Audio
-DEFAULT_SAMPLE_RATE = 16000
+# ── Audio ───────────────────────────────────────────────────────────────────
+DEVICE_SAMPLE_RATE  = 16000   # what the ESP32 expects
 DEFAULT_BIT_DEPTH   = 16
 DEFAULT_CHANNELS    = 1
 
-# Session
-MAX_SESSION_AUDIO_BYTES = 10 * DEFAULT_SAMPLE_RATE * 2  # 10 seconds
+# ── Session ─────────────────────────────────────────────────────────────────
+MAX_SESSION_AUDIO_BYTES = 10 * DEVICE_SAMPLE_RATE * 2  # 10 seconds
