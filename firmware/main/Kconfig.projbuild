@@ -1,0 +1,82 @@
+menu "herVoice Configuration"
+
+    config HERVOICE_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "MyNetwork"
+        help
+            SSID of the Wi-Fi network to connect to.
+
+    config HERVOICE_WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default ""
+        help
+            Password for the Wi-Fi network.
+
+    config HERVOICE_SERVER_HOST
+        string "Server Host"
+        default "192.168.1.35"
+        help
+            Hostname or IP address of the herVoice server.
+
+    config HERVOICE_SERVER_PORT
+        int "Server Port"
+        default 8765
+        help
+            TCP port of the herVoice server.
+
+    config HERVOICE_DEVICE_ID
+        hex "Device ID"
+        default 0x00000001
+        help
+            Unique device identifier sent to the server.
+
+    config HERVOICE_SAMPLE_RATE
+        int "Audio Sample Rate (Hz)"
+        default 16000
+        help
+            PCM sample rate in Hz.
+
+    config HERVOICE_AUDIO_FRAME_SAMPLES
+        int "Audio Frame Size (samples)"
+        default 800
+        help
+            50ms at 16kHz. Number of PCM samples per processing frame.
+
+    config HERVOICE_WAKE_THRESHOLD
+        int "Wake Word Detection Threshold"
+        range 1 100
+        default 80
+        help
+            Confidence threshold (1-100) for wake word detection.
+
+    config HERVOICE_VAD_START_THRESHOLD
+        int "VAD Speech Start Threshold"
+        default 500
+        help
+            Energy threshold above which speech is considered to have started.
+
+    config HERVOICE_VAD_STOP_THRESHOLD
+        int "VAD Speech Stop Threshold"
+        default 300
+        help
+            Energy threshold below which speech is considered to have stopped.
+
+    config HERVOICE_VAD_SILENCE_TIMEOUT_MS
+        int "VAD Silence Timeout (ms)"
+        default 1500
+        help
+            Duration of silence in milliseconds before ending a speech segment.
+
+    config HERVOICE_MAX_SESSION_DURATION_MS
+        int "Max Session Duration (ms)"
+        default 10000
+        help
+            Maximum duration of a single voice session in milliseconds.
+
+    config HERVOICE_TCP_RETRY_COUNT
+        int "TCP Retry Count"
+        default 5
+        help
+            Number of TCP connection retry attempts before giving up.
+
+endmenu

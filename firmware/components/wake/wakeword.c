@@ -18,6 +18,7 @@ static const char *TAG = "WAKE";
 #define WINDOW_MS           30
 #define WINDOW_SAMPLES      ((SAMPLE_RATE * WINDOW_MS) / 1000)
 #define WAKE_THRESHOLD      CONFIG_HERVOICE_WAKE_THRESHOLD
+#define WAKE_MODEL_NAME     "wn9_sophia_tts"
 #define DEBOUNCE_MS         1500
 #define EVENT_QUEUE_SIZE    4
 #define DETECT_TASK_STACK   8192
@@ -75,21 +76,19 @@ esp_err_t wake_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /* Load WakeNet model */
-    s_wakenet = esp_wn_handle_from_name("wn9_hilexin");
+    /* Load WakeNet model — non-fatal; touch screen is the primary wake trigger */
+    s_wakenet = esp_wn_handle_from_name(WAKE_MODEL_NAME);
     if (!s_wakenet) {
-        ESP_LOGW(TAG, "wn9_hilexin not found, trying default model");
-        s_wakenet = esp_wn_handle_from_name(ESP_WN_DEFAULT);
-    }
-    if (!s_wakenet) {
-        ESP_LOGE(TAG, "No WakeNet model available");
-        return ESP_ERR_NOT_FOUND;
+        ESP_LOGW(TAG, "WakeNet model '%s' not available — using touch trigger only",
+                 WAKE_MODEL_NAME);
+        return ESP_OK;
     }
 
-    s_model = s_wakenet->create(NULL, DET_MODE_90);
+    s_model = s_wakenet->create(WAKE_MODEL_NAME, DET_MODE_90);
     if (!s_model) {
-        ESP_LOGE(TAG, "Failed to create WakeNet model");
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "WakeNet create failed — using touch trigger only");
+        s_wakenet = NULL;
+        return ESP_OK;
     }
 
     ESP_LOGI(TAG, "WakeNet initialized, model chunk_num=%d",
@@ -99,6 +98,10 @@ esp_err_t wake_init(void)
 
 void wake_start_detection_task(void)
 {
+    if (!s_wakenet || !s_model) {
+        ESP_LOGW(TAG, "No WakeNet model, skipping detection task");
+        return;
+    }
     xTaskCreatePinnedToCore(detection_task, "wake_detect", DETECT_TASK_STACK,
                             NULL, DETECT_TASK_PRIO, &s_detect_task_handle, 1);
 }

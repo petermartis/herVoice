@@ -393,7 +393,7 @@ esp_err_t ui_init(void)
     s_state_label = lv_label_create(s_screen);
     lv_label_set_text(s_state_label, "Initializing...");
     lv_obj_set_style_text_color(s_state_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_obj_align(s_state_label, LV_ALIGN_CENTER, 0, -15);
 
     s_sub_label = lv_label_create(s_screen);

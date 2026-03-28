@@ -1,5 +1,6 @@
 #include <string.h>
 #include <errno.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
