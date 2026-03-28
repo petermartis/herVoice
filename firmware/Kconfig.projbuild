@@ -14,7 +14,7 @@ menu "herVoice Configuration"
 
     config HERVOICE_SERVER_HOST
         string "Server Host"
-        default "192.168.1.100"
+        default "192.168.1.35"
         help
             Hostname or IP address of the herVoice server.
 

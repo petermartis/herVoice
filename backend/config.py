@@ -12,7 +12,7 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", None) # None = auto-detect
 WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "")
 
 # LLM (OpenClaw / OpenAI-compatible)
-OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:11434/v1")
+OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://192.168.1.35:11434/v1")
 OPENCLAW_API_KEY  = os.getenv("OPENCLAW_API_KEY", "nocreds")
 OPENCLAW_MODEL    = os.getenv("OPENCLAW_MODEL", "qwen2.5:3b")
 OPENCLAW_SYSTEM_PROMPT = os.getenv(
