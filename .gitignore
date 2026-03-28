@@ -1,0 +1,35 @@
+# ESP-IDF build
+firmware/build/
+firmware/.cache/
+firmware/sdkconfig
+firmware/dependencies.lock
+firmware/managed_components/
+
+# Python
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/.venv/
+backend/venv/
+*.egg-info/
+.eggs/
+
+# Piper models (large binaries)
+*.onnx
+*.onnx.json
+
+# Whisper models
+*.pt
+*.bin
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+
+# Secrets
+.env
+*.env
+config.local.py
