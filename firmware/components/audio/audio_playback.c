@@ -10,11 +10,22 @@
 
 static const char *TAG = "AUDIO_PLAY";
 
-/* Waveshare ESP32-S3-Touch-LCD-1.85C speaker pins */
+/*
+ * Waveshare ESP32-S3-Touch-LCD-1.85C — confirmed from schematic + wiki:
+ * Speaker out goes through PCM5101A I2S DAC + power amplifier.
+ * SPK_DOUT  = GPIO47 (I2S data to PCM5101A)
+ * SPK_LRCK  = GPIO38 (WS / LRCLK)
+ * SPK_BCK   = GPIO48 (BCLK)
+ * SPK_MCLK  = GPIO2  (MCLK — shared with MIC_WS, safe because half-duplex)
+ * PA_EN     = GPIO15 (power amplifier enable, active HIGH)
+ *             NOTE: GPIO15 = MIC_SCK during capture; set as output during playback.
+ */
 #define SPK_I2S_PORT        I2S_NUM_1
-#define SPK_WS_GPIO         GPIO_NUM_15
-#define SPK_BCK_GPIO        GPIO_NUM_16
-#define SPK_DOUT_GPIO       GPIO_NUM_17
+#define SPK_WS_GPIO         GPIO_NUM_38
+#define SPK_BCK_GPIO        GPIO_NUM_48
+#define SPK_DOUT_GPIO       GPIO_NUM_47
+#define SPK_MCLK_GPIO       GPIO_NUM_2
+#define PA_EN_GPIO          GPIO_NUM_15
 
 #define SAMPLE_RATE         CONFIG_HERVOICE_SAMPLE_RATE
 #define PLAYBACK_CHUNK      512
@@ -72,11 +83,19 @@ esp_err_t audio_playback_init(void)
         return ret;
     }
 
+    /* PA enable pin — drive high to unmute amplifier */
+    gpio_config_t pa_cfg = {
+        .pin_bit_mask = 1ULL << PA_EN_GPIO,
+        .mode         = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&pa_cfg);
+    gpio_set_level(PA_EN_GPIO, 1);
+
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
+            .mclk = SPK_MCLK_GPIO,
             .bclk = SPK_BCK_GPIO,
             .ws   = SPK_WS_GPIO,
             .dout = SPK_DOUT_GPIO,

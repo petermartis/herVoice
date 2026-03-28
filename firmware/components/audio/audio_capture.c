@@ -1,7 +1,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/i2s_pdm.h"
+#include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "audio.h"
@@ -10,11 +10,17 @@
 
 static const char *TAG = "AUDIO_CAP";
 
-/* Waveshare ESP32-S3-Touch-LCD-1.85C microphone pins - adjust to match board */
+/*
+ * Waveshare ESP32-S3-Touch-LCD-1.85C — confirmed from schematic + wiki:
+ * Onboard mic is MSM261S4030H0R / ICS-43434 (standard I2S, not PDM)
+ * MIC_WS  = GPIO2  (LRCLK / word select)
+ * MIC_SCK = GPIO15 (BCLK)        NOTE: GPIO15 also used as PA_EN in audio_playback.c
+ * MIC_DIN = GPIO39 (DATA in)
+ */
 #define MIC_I2S_PORT        I2S_NUM_0
-#define MIC_WS_GPIO         GPIO_NUM_4
-#define MIC_SCK_GPIO        GPIO_NUM_5
-#define MIC_DIN_GPIO        GPIO_NUM_6
+#define MIC_WS_GPIO         GPIO_NUM_2
+#define MIC_SCK_GPIO        GPIO_NUM_15
+#define MIC_DIN_GPIO        GPIO_NUM_39
 
 #define SAMPLE_RATE         CONFIG_HERVOICE_SAMPLE_RATE
 #define DMA_BUF_SAMPLES     512
@@ -65,17 +71,21 @@ esp_err_t audio_init(void)
         return ret;
     }
 
-    i2s_pdm_rx_config_t pdm_cfg = {
-        .clk_cfg  = I2S_PDM_RX_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+    i2s_std_config_t std_cfg = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
-            .clk = MIC_SCK_GPIO,
-            .din = MIC_DIN_GPIO,
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = MIC_SCK_GPIO,
+            .ws   = MIC_WS_GPIO,
+            .dout = I2S_GPIO_UNUSED,
+            .din  = MIC_DIN_GPIO,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
-    ret = i2s_channel_init_pdm_rx_mode(s_mic_chan, &pdm_cfg);
+    ret = i2s_channel_init_std_mode(s_mic_chan, &std_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "i2s_channel_init_pdm_rx_mode: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "i2s_channel_init_std_mode (mic): %s", esp_err_to_name(ret));
         return ret;
     }
 

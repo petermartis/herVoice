@@ -14,14 +14,31 @@
 
 static const char *TAG = "UI";
 
-/* Display pin config for Waveshare ESP32-S3-Touch-LCD-1.85C (adjust as needed) */
+/*
+ * Waveshare ESP32-S3-Touch-LCD-1.85C — confirmed from schematic + wiki:
+ * Display: ST77916, QSPI interface (4 data lines, no DC pin, 32-bit cmd format)
+ *
+ * LCD_DATA0 (SDA0/MOSI) = GPIO46
+ * LCD_DATA1 (SDA1)      = GPIO45
+ * LCD_DATA2 (SDA2)      = GPIO42
+ * LCD_DATA3 (SDA3)      = GPIO41
+ * LCD_CLK               = GPIO40
+ * LCD_CS                = GPIO21
+ * LCD_TE  (tear effect)  = GPIO18
+ * LCD_RST               = via TCA9554 EXIO2 (I2C GPIO expander, not a direct GPIO → pass -1)
+ * LCD_BL  (backlight)   = GPIO5
+ */
 #define LCD_HOST        SPI2_HOST
-#define LCD_MOSI        GPIO_NUM_11
-#define LCD_CLK         GPIO_NUM_12
-#define LCD_CS          GPIO_NUM_10
-#define LCD_DC          GPIO_NUM_8
-#define LCD_RST         GPIO_NUM_9
-#define LCD_BL          GPIO_NUM_46
+#define LCD_DATA0       GPIO_NUM_46
+#define LCD_DATA1       GPIO_NUM_45
+#define LCD_DATA2       GPIO_NUM_42
+#define LCD_DATA3       GPIO_NUM_41
+#define LCD_CLK         GPIO_NUM_40
+#define LCD_CS          GPIO_NUM_21
+#define LCD_TE          GPIO_NUM_18
+#define LCD_BL          GPIO_NUM_5
+/* LCD_RST is controlled via TCA9554 I2C expander EXIO2; use -1 for direct GPIO */
+#define LCD_RST         (-1)
 #define LCD_H_RES       360
 #define LCD_V_RES       360
 #define LCD_BUF_LINES   40
@@ -114,34 +131,54 @@ esp_err_t ui_init(void)
     s_lvgl_mutex = xSemaphoreCreateMutex();
     if (!s_lvgl_mutex) return ESP_ERR_NO_MEM;
 
-    /* SPI bus init */
+    /*
+     * QSPI SPI bus — ST77916 uses 4 data lines.
+     * mosi_io_num  = DATA0
+     * miso_io_num  = DATA1  (output in QSPI write mode)
+     * quadwp_io_num = DATA2
+     * quadhd_io_num = DATA3
+     */
     spi_bus_config_t buscfg = {
-        .mosi_io_num   = LCD_MOSI,
-        .miso_io_num   = -1,
+        .mosi_io_num   = LCD_DATA0,
+        .miso_io_num   = LCD_DATA1,
         .sclk_io_num   = LCD_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+        .quadwp_io_num = LCD_DATA2,
+        .quadhd_io_num = LCD_DATA3,
         .max_transfer_sz = LCD_H_RES * LCD_BUF_LINES * sizeof(uint16_t),
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    /* LCD panel IO */
+    /*
+     * ST77916 QSPI panel IO.
+     * No DC pin (dc_gpio_num = -1); command/address packed in 32-bit opcode.
+     * lcd_cmd_bits = 32 per ST77916 QSPI protocol.
+     * flags.quad_mode = 1 to enable quad-SPI writes.
+     */
     esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = {
-        .dc_gpio_num       = LCD_DC,
+        .dc_gpio_num       = -1,
         .cs_gpio_num       = LCD_CS,
-        .pclk_hz           = 40 * 1000 * 1000,
-        .lcd_cmd_bits      = 8,
+        .pclk_hz           = 80 * 1000 * 1000,
+        .lcd_cmd_bits      = 32,
         .lcd_param_bits    = 8,
         .spi_mode          = 0,
         .trans_queue_depth = 10,
+        .flags = {
+            .quad_mode = 1,
+        },
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST,
                                               &io_cfg, &io_handle));
 
-    /* Panel (ST7789 as placeholder, replace with actual ST77916 driver) */
+    /*
+     * ST77916 panel driver.
+     * NOTE: ESP-IDF has no built-in ST77916 driver. Add the Waveshare component
+     * (or espressif/esp_lcd_st77916 from component registry) to idf_component.yml
+     * and replace esp_lcd_new_panel_st7789 with esp_lcd_new_panel_st77916.
+     * The init sequence differs; this ST7789 call is a compile placeholder.
+     */
     esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num  = LCD_RST,
+        .reset_gpio_num  = LCD_RST,   /* -1: reset via TCA9554 EXIO2 separately */
         .rgb_endian      = LCD_RGB_ENDIAN_RGB,
         .bits_per_pixel  = 16,
     };
@@ -149,6 +186,9 @@ esp_err_t ui_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
+
+    /* TE (tearing effect) pin — configure as input for optional vsync sync */
+    gpio_set_direction(LCD_TE, GPIO_MODE_INPUT);
 
     /* Backlight */
     gpio_set_direction(LCD_BL, GPIO_MODE_OUTPUT);
