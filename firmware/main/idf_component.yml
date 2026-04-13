@@ -1,5 +1,6 @@
 dependencies:
   idf: ">=5.0"
-  espressif/esp_lcd_st77916: "^2.0.2"
   lvgl/lvgl: "~8.3.0"
   espressif/esp-sr: "^2.1.4"
+  espressif/es7210: "^1.0.0"
+  espressif/es8311: "^1.0.0"

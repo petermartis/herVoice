@@ -33,3 +33,5 @@ backend/venv/
 .env
 *.env
 config.local.py
+build/
+sdkconfig

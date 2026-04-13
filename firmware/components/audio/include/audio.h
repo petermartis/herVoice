@@ -30,6 +30,9 @@ void audio_play_frames(const int16_t *buf, size_t samples);
 /* Flush pending playback samples (blocks until drained) */
 void audio_playback_flush(void);
 
+/* Play a sine-wave test tone — blocks until samples are queued */
+void audio_play_test_tone(uint32_t freq_hz, uint32_t duration_ms);
+
 #ifdef __cplusplus
 }
 #endif
