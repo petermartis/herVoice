@@ -28,7 +28,7 @@ static const char *TAG = "AUDIO_PLAY";
 #define SAMPLE_RATE         CONFIG_HERVOICE_SAMPLE_RATE
 #define PLAYBACK_CHUNK      512
 #define PLAYBACK_BUF_SAMPLES 8192
-#define PLAYBACK_TASK_STACK 4096
+#define PLAYBACK_TASK_STACK 8192
 #define PLAYBACK_TASK_PRIO  6
 
 static i2s_chan_handle_t  s_tx_chan = NULL;

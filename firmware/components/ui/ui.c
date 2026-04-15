@@ -9,6 +9,7 @@
  */
 
 #include <string.h>
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -45,13 +46,13 @@ static const char *TAG = "UI";
 #define TCA9554_ADDR        0x20
 #define TCA9554_REG_OUTPUT  0x01
 #define TCA9554_REG_CONFIG  0x03
-#define TCA9554_EXIO2_BIT   (1 << 2)
+#define TCA9554_EXIO2_BIT   (1 << 1)  /* P1 = EXIO2; Waveshare: (1<<(pin-1)) with pin=2 */
 
 /* ── LCD geometry ───────────────────────────────────────────────────────────── */
 #define LCD_H_RES       360
 #define LCD_V_RES       360
 #define LCD_COLOR_BITS  16
-#define LCD_BUF_LINES   40
+#define LVGL_BUF_LEN    (LCD_H_RES * LCD_V_RES / 20)  /* 6480 px — matches Waveshare reference */
 
 /* ── Backlight (LEDC PWM) ───────────────────────────────────────────────────── */
 #define BL_LEDC_TIMER       LEDC_TIMER_0
@@ -65,26 +66,27 @@ static const char *TAG = "UI";
 #define LVGL_TASK_PRIO   3
 #define LVGL_TICK_MS     2
 
-/* ── ST77916 vendor init sequence (from Waveshare reference driver) ─────────── */
+/* ── ST77916 vendor init (Waveshare V2: 0x28 unlock, full GOA, VCOM set) ───── */
 static const st77916_lcd_init_cmd_t s_vendor_init[] = {
+    /* Page 0x28 unlock */
     {0xF0, (uint8_t[]){0x28}, 1, 0},
     {0xF2, (uint8_t[]){0x28}, 1, 0},
-    {0x73, (uint8_t[]){0xF0}, 1, 0},
     {0x7C, (uint8_t[]){0xD1}, 1, 0},
     {0x83, (uint8_t[]){0xE0}, 1, 0},
     {0x84, (uint8_t[]){0x61}, 1, 0},
     {0xF2, (uint8_t[]){0x82}, 1, 0},
+    /* Page 0x01 — power/timing */
     {0xF0, (uint8_t[]){0x00}, 1, 0},
     {0xF0, (uint8_t[]){0x01}, 1, 0},
     {0xF1, (uint8_t[]){0x01}, 1, 0},
-    {0xB0, (uint8_t[]){0x56}, 1, 0},
-    {0xB1, (uint8_t[]){0x4D}, 1, 0},
-    {0xB2, (uint8_t[]){0x24}, 1, 0},
-    {0xB4, (uint8_t[]){0x87}, 1, 0},
-    {0xB5, (uint8_t[]){0x44}, 1, 0},
-    {0xB6, (uint8_t[]){0x8B}, 1, 0},
-    {0xB7, (uint8_t[]){0x40}, 1, 0},
-    {0xB8, (uint8_t[]){0x86}, 1, 0},
+    {0xB0, (uint8_t[]){0x49}, 1, 0},
+    {0xB1, (uint8_t[]){0x4A}, 1, 0},
+    {0xB2, (uint8_t[]){0x1F}, 1, 0},
+    {0xB4, (uint8_t[]){0x46}, 1, 0},
+    {0xB5, (uint8_t[]){0x34}, 1, 0},
+    {0xB6, (uint8_t[]){0xD5}, 1, 0},
+    {0xB7, (uint8_t[]){0x30}, 1, 0},
+    {0xB8, (uint8_t[]){0x04}, 1, 0},
     {0xBA, (uint8_t[]){0x00}, 1, 0},
     {0xBB, (uint8_t[]){0x08}, 1, 0},
     {0xBC, (uint8_t[]){0x08}, 1, 0},
@@ -97,45 +99,163 @@ static const st77916_lcd_init_cmd_t s_vendor_init[] = {
     {0xC5, (uint8_t[]){0x37}, 1, 0},
     {0xC6, (uint8_t[]){0xA9}, 1, 0},
     {0xC7, (uint8_t[]){0x41}, 1, 0},
-    {0xC8, (uint8_t[]){0x01}, 1, 0},
+    {0xC8, (uint8_t[]){0x51}, 1, 0},  /* 0x01→0x51: match default charge pump level */
     {0xC9, (uint8_t[]){0xA9}, 1, 0},
     {0xCA, (uint8_t[]){0x41}, 1, 0},
-    {0xCB, (uint8_t[]){0x01}, 1, 0},
+    {0xCB, (uint8_t[]){0x51}, 1, 0},  /* 0x01→0x51: match default charge pump level */
     {0xD0, (uint8_t[]){0x91}, 1, 0},
     {0xD1, (uint8_t[]){0x68}, 1, 0},
     {0xD2, (uint8_t[]){0x68}, 1, 0},
     {0xF5, (uint8_t[]){0x00, 0xA5}, 2, 0},
-    {0xDD, (uint8_t[]){0x4F}, 1, 0},
-    {0xDE, (uint8_t[]){0x4F}, 1, 0},
     {0xF1, (uint8_t[]){0x10}, 1, 0},
+    /* Page 0x02 — gamma */
     {0xF0, (uint8_t[]){0x00}, 1, 0},
     {0xF0, (uint8_t[]){0x02}, 1, 0},
-    {0xE0, (uint8_t[]){0xF0,0x0A,0x10,0x09,0x09,0x36,0x35,0x33,0x4A,0x29,0x15,0x15,0x2E,0x34}, 14, 0},
-    {0xE1, (uint8_t[]){0xF0,0x0A,0x0F,0x08,0x08,0x05,0x34,0x33,0x4A,0x39,0x15,0x15,0x2D,0x33}, 14, 0},
+    {0xE0, (uint8_t[]){0x70,0x09,0x12,0x0C,0x0B,0x27,0x38,0x54,0x4E,0x19,0x15,0x15,0x2C,0x2F}, 14, 0},
+    {0xE1, (uint8_t[]){0x70,0x08,0x11,0x0C,0x0B,0x27,0x38,0x43,0x4C,0x18,0x14,0x14,0x2B,0x2D}, 14, 0},
+    /* Page 0x10 — GOA timing + signal mapping */
     {0xF0, (uint8_t[]){0x10}, 1, 0},
     {0xF3, (uint8_t[]){0x10}, 1, 0},
-    {0xE0, (uint8_t[]){0x07}, 1, 0},
+    {0xE0, (uint8_t[]){0x0A}, 1, 0},  /* 0x08→0x0A: GOA timing (match component default) */
     {0xE1, (uint8_t[]){0x00}, 1, 0},
-    {0xE2, (uint8_t[]){0x00}, 1, 0},
+    {0xE2, (uint8_t[]){0x0B}, 1, 0},
     {0xE3, (uint8_t[]){0x00}, 1, 0},
     {0xE4, (uint8_t[]){0xE0}, 1, 0},
     {0xE5, (uint8_t[]){0x06}, 1, 0},
     {0xE6, (uint8_t[]){0x21}, 1, 0},
-    {0xE7, (uint8_t[]){0x01}, 1, 0},
+    {0xE7, (uint8_t[]){0x00}, 1, 0},
     {0xE8, (uint8_t[]){0x05}, 1, 0},
-    {0xE9, (uint8_t[]){0x02}, 1, 0},
-    {0xEA, (uint8_t[]){0xDA}, 1, 0},
-    {0xEB, (uint8_t[]){0x00}, 1, 0},
-    {0xEC, (uint8_t[]){0x00}, 1, 0},
-    {0xED, (uint8_t[]){0x0F}, 1, 0},
+    {0xE9, (uint8_t[]){0x82}, 1, 0},
+    {0xEA, (uint8_t[]){0xDF}, 1, 0},
+    {0xEB, (uint8_t[]){0x89}, 1, 0},
+    {0xEC, (uint8_t[]){0x20}, 1, 0},
+    {0xED, (uint8_t[]){0x14}, 1, 0},
+    {0xEE, (uint8_t[]){0xFF}, 1, 0},
+    {0xEF, (uint8_t[]){0x00}, 1, 0},
+    {0xF8, (uint8_t[]){0xFF}, 1, 0},
+    {0xF9, (uint8_t[]){0x00}, 1, 0},
+    {0xFA, (uint8_t[]){0x00}, 1, 0},
+    {0xFB, (uint8_t[]){0x30}, 1, 0},
+    {0xFC, (uint8_t[]){0x00}, 1, 0},
+    {0xFD, (uint8_t[]){0x00}, 1, 0},
+    {0xFE, (uint8_t[]){0x00}, 1, 0},
+    {0xFF, (uint8_t[]){0x00}, 1, 0},
+    {0x60, (uint8_t[]){0x42}, 1, 0},
+    {0x61, (uint8_t[]){0xE0}, 1, 0},
+    {0x62, (uint8_t[]){0x40}, 1, 0},
+    {0x63, (uint8_t[]){0x40}, 1, 0},
+    {0x64, (uint8_t[]){0x02}, 1, 0},
+    {0x65, (uint8_t[]){0x00}, 1, 0},
+    {0x66, (uint8_t[]){0x40}, 1, 0},
+    {0x67, (uint8_t[]){0x03}, 1, 0},
+    {0x68, (uint8_t[]){0x00}, 1, 0},
+    {0x69, (uint8_t[]){0x00}, 1, 0},
+    {0x6A, (uint8_t[]){0x00}, 1, 0},
+    {0x6B, (uint8_t[]){0x00}, 1, 0},
+    {0x70, (uint8_t[]){0x42}, 1, 0},
+    {0x71, (uint8_t[]){0xE0}, 1, 0},
+    {0x72, (uint8_t[]){0x40}, 1, 0},
+    {0x73, (uint8_t[]){0x40}, 1, 0},
+    {0x74, (uint8_t[]){0x02}, 1, 0},
+    {0x75, (uint8_t[]){0x00}, 1, 0},
+    {0x76, (uint8_t[]){0x40}, 1, 0},
+    {0x77, (uint8_t[]){0x03}, 1, 0},
+    {0x78, (uint8_t[]){0x00}, 1, 0},
+    {0x79, (uint8_t[]){0x00}, 1, 0},
+    {0x7A, (uint8_t[]){0x00}, 1, 0},
+    {0x7B, (uint8_t[]){0x00}, 1, 0},
+    {0x80, (uint8_t[]){0x38}, 1, 0},
+    {0x81, (uint8_t[]){0x00}, 1, 0},
+    {0x82, (uint8_t[]){0x04}, 1, 0},
+    {0x83, (uint8_t[]){0x02}, 1, 0},
+    {0x84, (uint8_t[]){0xDC}, 1, 0},
+    {0x85, (uint8_t[]){0x00}, 1, 0},
+    {0x86, (uint8_t[]){0x00}, 1, 0},
+    {0x87, (uint8_t[]){0x00}, 1, 0},
+    {0x88, (uint8_t[]){0x38}, 1, 0},
+    {0x89, (uint8_t[]){0x00}, 1, 0},
+    {0x8A, (uint8_t[]){0x06}, 1, 0},
+    {0x8B, (uint8_t[]){0x02}, 1, 0},
+    {0x8C, (uint8_t[]){0xDE}, 1, 0},
+    {0x8D, (uint8_t[]){0x00}, 1, 0},
+    {0x8E, (uint8_t[]){0x00}, 1, 0},
+    {0x8F, (uint8_t[]){0x00}, 1, 0},
+    {0x90, (uint8_t[]){0x38}, 1, 0},
+    {0x91, (uint8_t[]){0x00}, 1, 0},
+    {0x92, (uint8_t[]){0x08}, 1, 0},
+    {0x93, (uint8_t[]){0x02}, 1, 0},
+    {0x94, (uint8_t[]){0xE0}, 1, 0},
+    {0x95, (uint8_t[]){0x00}, 1, 0},
+    {0x96, (uint8_t[]){0x00}, 1, 0},
+    {0x97, (uint8_t[]){0x00}, 1, 0},
+    {0x98, (uint8_t[]){0x38}, 1, 0},
+    {0x99, (uint8_t[]){0x00}, 1, 0},
+    {0x9A, (uint8_t[]){0x0A}, 1, 0},
+    {0x9B, (uint8_t[]){0x02}, 1, 0},
+    {0x9C, (uint8_t[]){0xE2}, 1, 0},
+    {0x9D, (uint8_t[]){0x00}, 1, 0},
+    {0x9E, (uint8_t[]){0x00}, 1, 0},
+    {0x9F, (uint8_t[]){0x00}, 1, 0},
+    {0xA0, (uint8_t[]){0x38}, 1, 0},
+    {0xA1, (uint8_t[]){0x00}, 1, 0},
+    {0xA2, (uint8_t[]){0x03}, 1, 0},
+    {0xA3, (uint8_t[]){0x02}, 1, 0},
+    {0xA4, (uint8_t[]){0xDB}, 1, 0},
+    {0xA5, (uint8_t[]){0x00}, 1, 0},
+    {0xA6, (uint8_t[]){0x00}, 1, 0},
+    {0xA7, (uint8_t[]){0x00}, 1, 0},
+    {0xA8, (uint8_t[]){0x38}, 1, 0},
+    {0xA9, (uint8_t[]){0x00}, 1, 0},
+    {0xAA, (uint8_t[]){0x05}, 1, 0},
+    {0xAB, (uint8_t[]){0x02}, 1, 0},
+    {0xAC, (uint8_t[]){0xDD}, 1, 0},
+    {0xAD, (uint8_t[]){0x00}, 1, 0},
+    {0xAE, (uint8_t[]){0x00}, 1, 0},
+    {0xAF, (uint8_t[]){0x00}, 1, 0},
+    {0xB0, (uint8_t[]){0x38}, 1, 0},
+    {0xB1, (uint8_t[]){0x00}, 1, 0},
+    {0xB2, (uint8_t[]){0x07}, 1, 0},
+    {0xB3, (uint8_t[]){0x02}, 1, 0},
+    {0xB4, (uint8_t[]){0xDF}, 1, 0},
+    {0xB5, (uint8_t[]){0x00}, 1, 0},
+    {0xB6, (uint8_t[]){0x00}, 1, 0},
+    {0xB7, (uint8_t[]){0x00}, 1, 0},
+    {0xB8, (uint8_t[]){0x38}, 1, 0},
+    {0xB9, (uint8_t[]){0x00}, 1, 0},
+    {0xBA, (uint8_t[]){0x09}, 1, 0},
+    {0xBB, (uint8_t[]){0x02}, 1, 0},
+    {0xBC, (uint8_t[]){0xE1}, 1, 0},
+    {0xBD, (uint8_t[]){0x00}, 1, 0},
+    {0xBE, (uint8_t[]){0x00}, 1, 0},
+    {0xBF, (uint8_t[]){0x00}, 1, 0},
+    {0xC0, (uint8_t[]){0x22}, 1, 0},
+    {0xC1, (uint8_t[]){0xAA}, 1, 0},
+    {0xC2, (uint8_t[]){0x65}, 1, 0},
+    {0xC3, (uint8_t[]){0x74}, 1, 0},
+    {0xC4, (uint8_t[]){0x47}, 1, 0},
+    {0xC5, (uint8_t[]){0x56}, 1, 0},
+    {0xC6, (uint8_t[]){0x00}, 1, 0},
+    {0xC7, (uint8_t[]){0x88}, 1, 0},
+    {0xC8, (uint8_t[]){0x99}, 1, 0},
+    {0xC9, (uint8_t[]){0x33}, 1, 0},
+    {0xD0, (uint8_t[]){0x11}, 1, 0},
+    {0xD1, (uint8_t[]){0xAA}, 1, 0},
+    {0xD2, (uint8_t[]){0x65}, 1, 0},
+    {0xD3, (uint8_t[]){0x74}, 1, 0},
+    {0xD4, (uint8_t[]){0x47}, 1, 0},
+    {0xD5, (uint8_t[]){0x56}, 1, 0},
+    {0xD6, (uint8_t[]){0x00}, 1, 0},
+    {0xD7, (uint8_t[]){0x88}, 1, 0},
+    {0xD8, (uint8_t[]){0x99}, 1, 0},
+    {0xD9, (uint8_t[]){0x33}, 1, 0},
     {0xF3, (uint8_t[]){0x01}, 1, 0},
     {0xF0, (uint8_t[]){0x00}, 1, 0},
-    {0x21, (uint8_t[]){0x00}, 1, 0},
-    {0x11, (uint8_t[]){0x00}, 1, 120},  /* Sleep out, 120ms delay */
-    {0x29, (uint8_t[]){0x00}, 1, 0},    /* Display on */
+    /* INVON (0x21) omitted — panel is normally-black; INVON would invert all colours */
+    {0x11, (uint8_t[]){0x00}, 1, 120},  /* SLPOUT */
 };
 
 /* ── Module state ───────────────────────────────────────────────────────────── */
+static esp_lcd_panel_io_handle_t s_io_handle   = NULL;
 static esp_lcd_panel_handle_t  s_panel         = NULL;
 static lv_disp_t              *s_disp          = NULL;
 static lv_obj_t               *s_screen        = NULL;
@@ -145,6 +265,12 @@ static SemaphoreHandle_t       s_lvgl_mutex    = NULL;
 static volatile ui_state_t     s_current_state = UI_STATE_IDLE;
 static volatile ui_state_t     s_pending_state = UI_STATE_IDLE;
 static volatile bool           s_state_changed = false;
+
+static lv_disp_drv_t           s_disp_drv;
+static lv_disp_draw_buf_t      s_draw_buf_desc;
+/* Two PSRAM buffers — double-buffering lets flush_ready be called synchronously (Waveshare pattern) */
+static lv_color_t             *s_draw_buf1     = NULL;
+static lv_color_t             *s_draw_buf2     = NULL;
 
 /* ── TCA9554 helper ─────────────────────────────────────────────────────────── */
 
@@ -200,10 +326,13 @@ static esp_err_t tca9554_set_exio2(bool level)
 
 static void lcd_hardware_reset(void)
 {
-    tca9554_set_exio2(false);
+    esp_err_t r;
+    r = tca9554_set_exio2(false);
+    ESP_LOGI(TAG, "DBG rst_assert  ret=%s  bit=0x%02x", esp_err_to_name(r), TCA9554_EXIO2_BIT);
     vTaskDelay(pdMS_TO_TICKS(10));
-    tca9554_set_exio2(true);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    r = tca9554_set_exio2(true);
+    ESP_LOGI(TAG, "DBG rst_deassert ret=%s", esp_err_to_name(r));
+    vTaskDelay(pdMS_TO_TICKS(120));
 }
 
 /* ── Backlight (LEDC PWM) ───────────────────────────────────────────────────── */
@@ -239,10 +368,19 @@ static void backlight_init(uint8_t brightness_percent)
 
 static void lcd_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    esp_lcd_panel_draw_bitmap(s_panel,
+    static int s_flush_n = 0;
+    s_flush_n++;
+    if (s_flush_n <= 25) {  /* log first 25 flushes */
+        const uint16_t *p = (const uint16_t *)color_p;
+        ESP_LOGI(TAG, "DBG flush#%02d (%d,%d)-(%d,%d) px[0..3]=%04x %04x %04x %04x",
+                 s_flush_n, area->x1, area->y1, area->x2, area->y2,
+                 p[0], p[1], p[2], p[3]);
+    }
+    esp_err_t r = esp_lcd_panel_draw_bitmap(s_panel,
                               area->x1, area->y1,
                               area->x2 + 1, area->y2 + 1,
                               (void *)color_p);
+    if (r != ESP_OK) ESP_LOGE(TAG, "DBG draw_bitmap err: %s", esp_err_to_name(r));
     lv_disp_flush_ready(drv);
 }
 
@@ -291,6 +429,7 @@ static void apply_state(ui_state_t state)
 static void lvgl_task(void *arg)
 {
     ESP_LOGI(TAG, "LVGL task started");
+    int tick = 0;
     while (1) {
         if (xSemaphoreTake(s_lvgl_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             if (s_state_changed) {
@@ -300,6 +439,8 @@ static void lvgl_task(void *arg)
             lv_timer_handler();
             xSemaphoreGive(s_lvgl_mutex);
         }
+        tick++;
+        if (tick <= 5) ESP_LOGI(TAG, "DBG lvgl_task tick %d", tick);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -327,28 +468,29 @@ esp_err_t ui_init(void)
         .data6_io_num    = -1,
         .data7_io_num    = -1,
         .flags           = SPICOMMON_BUSFLAG_MASTER,
-        .max_transfer_sz = LCD_H_RES * LCD_BUF_LINES * LCD_COLOR_BITS / 8,
+        .max_transfer_sz = LVGL_BUF_LEN * LCD_COLOR_BITS / 8,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     /* 3. Panel IO — QSPI, 32-bit cmd, no DC pin */
-    esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = {
-        .cs_gpio_num       = LCD_CS,
-        .dc_gpio_num       = -1,
-        .spi_mode          = 0,
-        .pclk_hz           = 80 * 1000 * 1000,
-        .trans_queue_depth = 10,
-        .lcd_cmd_bits      = 32,
-        .lcd_param_bits    = 8,
+        .cs_gpio_num         = LCD_CS,
+        .dc_gpio_num         = -1,
+        .spi_mode            = 0,
+        .pclk_hz             = 40 * 1000 * 1000,
+        .trans_queue_depth   = 10,
+        .on_color_trans_done = NULL,
+        .user_ctx            = NULL,
+        .lcd_cmd_bits        = 32,
+        .lcd_param_bits      = 8,
         .flags = {
             .quad_mode = 1,
         },
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
-        (esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io_handle));
+        (esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io_handle));
 
-    /* 4. ST77916 panel with vendor init sequence */
+    /* 4. Waveshare V2 vendor init (0x28 unlock key, full GOA, VCOM set) */
     st77916_vendor_config_t vendor_cfg = {
         .init_cmds      = s_vendor_init,
         .init_cmds_size = sizeof(s_vendor_init) / sizeof(s_vendor_init[0]),
@@ -362,9 +504,40 @@ esp_err_t ui_init(void)
         .bits_per_pixel = LCD_COLOR_BITS,
         .vendor_config  = &vendor_cfg,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(io_handle, &panel_cfg, &s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
+    esp_err_t panel_ret;
+    panel_ret = esp_lcd_new_panel_st77916(s_io_handle, &panel_cfg, &s_panel);
+    ESP_LOGI(TAG, "DBG new_panel:   %s", esp_err_to_name(panel_ret));
+    ESP_ERROR_CHECK(panel_ret);
+
+    panel_ret = esp_lcd_panel_reset(s_panel);
+    ESP_LOGI(TAG, "DBG panel_reset: %s", esp_err_to_name(panel_ret));
+    ESP_ERROR_CHECK(panel_ret);
+
+    panel_ret = esp_lcd_panel_init(s_panel);
+    ESP_LOGI(TAG, "DBG panel_init:  %s", esp_err_to_name(panel_ret));
+    ESP_ERROR_CHECK(panel_ret);
+
+    panel_ret = esp_lcd_panel_disp_on_off(s_panel, true);
+    ESP_LOGI(TAG, "DBG disp_on:     %s", esp_err_to_name(panel_ret));
+    ESP_ERROR_CHECK(panel_ret);
+
+    /* DBG: fill entire GRAM with 0x0000 (black on NB panel, white on NW panel) for 2s.
+     * Tells us: (a) GRAM writes work, (b) panel polarity without INVON. */
+    {
+        static uint16_t fill_line[LCD_H_RES];
+        memset(fill_line, 0x00, sizeof(fill_line));
+        for (int y = 0; y < LCD_V_RES; y++) {
+            esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_H_RES, y + 1, fill_line);
+        }
+        ESP_LOGI(TAG, "DBG 0x0000 fill done — 2s hold (NB=black, NW=white)");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        memset(fill_line, 0xFF, sizeof(fill_line));
+        for (int y = 0; y < LCD_V_RES; y++) {
+            esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_H_RES, y + 1, fill_line);
+        }
+        ESP_LOGI(TAG, "DBG 0xFFFF fill done — 2s hold (NB=white, NW=black)");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
 
     /* 5. TE pin (tearing effect sync input) */
     gpio_set_direction(LCD_TE, GPIO_MODE_INPUT);
@@ -375,31 +548,38 @@ esp_err_t ui_init(void)
     /* 7. LVGL */
     lv_init();
 
-    static lv_color_t          draw_buf[LCD_H_RES * LCD_BUF_LINES];
-    static lv_disp_draw_buf_t  draw_buf_desc;
-    lv_disp_draw_buf_init(&draw_buf_desc, draw_buf, NULL, LCD_H_RES * LCD_BUF_LINES);
+    /* Allocate from internal DMA-capable DRAM — PSRAM buffers are not SPI-DMA safe in IDF 5.3 */
+    s_draw_buf1 = heap_caps_malloc(LVGL_BUF_LEN * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    s_draw_buf2 = heap_caps_malloc(LVGL_BUF_LEN * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!s_draw_buf1 || !s_draw_buf2) {
+        ESP_LOGE(TAG, "Failed to allocate LVGL draw buffers in internal DRAM");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(s_draw_buf1, 0, LVGL_BUF_LEN * sizeof(lv_color_t));
+    memset(s_draw_buf2, 0, LVGL_BUF_LEN * sizeof(lv_color_t));
+    lv_disp_draw_buf_init(&s_draw_buf_desc, s_draw_buf1, s_draw_buf2, LVGL_BUF_LEN);
 
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res  = LCD_H_RES;
-    disp_drv.ver_res  = LCD_V_RES;
-    disp_drv.flush_cb = lcd_flush_cb;
-    disp_drv.draw_buf = &draw_buf_desc;
-    s_disp = lv_disp_drv_register(&disp_drv);
+    lv_disp_drv_init(&s_disp_drv);
+    s_disp_drv.hor_res  = LCD_H_RES;
+    s_disp_drv.ver_res  = LCD_V_RES;
+    s_disp_drv.flush_cb = lcd_flush_cb;
+    s_disp_drv.draw_buf = &s_draw_buf_desc;
+    s_disp = lv_disp_drv_register(&s_disp_drv);
 
     s_screen = lv_scr_act();
-    lv_obj_set_style_bg_color(s_screen, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, LV_PART_MAIN);
 
     s_state_label = lv_label_create(s_screen);
-    lv_label_set_text(s_state_label, "Initializing...");
     lv_obj_set_style_text_color(s_state_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_obj_align(s_state_label, LV_ALIGN_CENTER, 0, -15);
 
     s_sub_label = lv_label_create(s_screen);
-    lv_label_set_text(s_sub_label, "herVoice");
-    lv_obj_set_style_text_color(s_sub_label, lv_color_make(180, 180, 180), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_sub_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_align(s_sub_label, LV_ALIGN_CENTER, 0, 20);
+
+    /* Render IDLE state immediately */
+    apply_state(UI_STATE_IDLE);
 
     /* 8. LVGL tick timer */
     esp_timer_handle_t tick_timer;
