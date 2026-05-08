@@ -268,7 +268,6 @@ static volatile bool           s_state_changed = false;
 
 static lv_disp_drv_t           s_disp_drv;
 static lv_disp_draw_buf_t      s_draw_buf_desc;
-/* Two PSRAM buffers — double-buffering lets flush_ready be called synchronously (Waveshare pattern) */
 static lv_color_t             *s_draw_buf1     = NULL;
 static lv_color_t             *s_draw_buf2     = NULL;
 
@@ -366,22 +365,29 @@ static void backlight_init(uint8_t brightness_percent)
 
 /* ── LCD flush callback ─────────────────────────────────────────────────────── */
 
+/*
+ * Called from SPI DMA completion ISR when the panel IO finishes transmitting
+ * a color buffer. Signals LVGL that the buffer is now free to be reused.
+ * Must NOT be called synchronously in lcd_flush_cb — with trans_queue_depth>1
+ * draw_bitmap is non-blocking (spi_device_queue_trans), so the DMA is still
+ * reading the buffer when the draw_bitmap call returns.
+ */
+static bool lcd_flush_done_cb(esp_lcd_panel_io_handle_t panel_io,
+                               esp_lcd_panel_io_event_data_t *edata,
+                               void *user_ctx)
+{
+    lv_disp_drv_t *drv = (lv_disp_drv_t *)user_ctx;
+    lv_disp_flush_ready(drv);
+    return false;
+}
+
 static void lcd_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    static int s_flush_n = 0;
-    s_flush_n++;
-    if (s_flush_n <= 25) {  /* log first 25 flushes */
-        const uint16_t *p = (const uint16_t *)color_p;
-        ESP_LOGI(TAG, "DBG flush#%02d (%d,%d)-(%d,%d) px[0..3]=%04x %04x %04x %04x",
-                 s_flush_n, area->x1, area->y1, area->x2, area->y2,
-                 p[0], p[1], p[2], p[3]);
-    }
-    esp_err_t r = esp_lcd_panel_draw_bitmap(s_panel,
+    esp_lcd_panel_draw_bitmap(s_panel,
                               area->x1, area->y1,
                               area->x2 + 1, area->y2 + 1,
                               (void *)color_p);
-    if (r != ESP_OK) ESP_LOGE(TAG, "DBG draw_bitmap err: %s", esp_err_to_name(r));
-    lv_disp_flush_ready(drv);
+    /* lv_disp_flush_ready is called from lcd_flush_done_cb once DMA completes */
 }
 
 /* ── LVGL tick callback ─────────────────────────────────────────────────────── */
@@ -479,8 +485,8 @@ esp_err_t ui_init(void)
         .spi_mode            = 0,
         .pclk_hz             = 40 * 1000 * 1000,
         .trans_queue_depth   = 10,
-        .on_color_trans_done = NULL,
-        .user_ctx            = NULL,
+        .on_color_trans_done = lcd_flush_done_cb,
+        .user_ctx            = &s_disp_drv,  /* populated before first flush fires */
         .lcd_cmd_bits        = 32,
         .lcd_param_bits      = 8,
         .flags = {
