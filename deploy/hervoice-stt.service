@@ -1,0 +1,15 @@
+[Unit]
+Description=herVoice STT (faster-whisper large-v3-turbo, CPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/foscam/herVoice/venv/bin/python /home/foscam/herVoice/backend/services/stt_server.py --port 15556 --model large-v3-turbo --device cpu --compute int8
+WorkingDirectory=/home/foscam/herVoice
+Restart=on-failure
+RestartSec=5
+User=foscam
+
+[Install]
+WantedBy=multi-user.target

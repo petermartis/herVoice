@@ -1,0 +1,16 @@
+[Unit]
+Description=herVoice TTS (Kokoro-82M EN + Piper SK, CPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/foscam/herVoice/venv/bin/python /home/foscam/herVoice/backend/services/tts_server.py --port 15555
+WorkingDirectory=/home/foscam/herVoice
+Restart=on-failure
+RestartSec=5
+User=foscam
+Environment=PIPER_DATA_DIR=/home/foscam/herVoice/piper-voices
+
+[Install]
+WantedBy=multi-user.target

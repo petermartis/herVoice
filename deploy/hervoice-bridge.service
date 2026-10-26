@@ -1,0 +1,15 @@
+[Unit]
+Description=herVoice voice bridge (TCP 8765: device protocol -> STT/LLM/TTS)
+After=network-online.target hervoice-stt.service hervoice-tts.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/foscam/herVoice/venv/bin/python /home/foscam/herVoice/backend/server.py
+WorkingDirectory=/home/foscam/herVoice/backend
+Restart=on-failure
+RestartSec=5
+User=foscam
+
+[Install]
+WantedBy=multi-user.target
