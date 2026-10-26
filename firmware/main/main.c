@@ -6,6 +6,7 @@
 #include "nvs_flash.h"
 #include "audio.h"
 #include "wake.h"
+#include "model_path.h"   /* esp-sr: map the model partition so WakeNet can load */"
 #include "net.h"
 #include "ui.h"
 #include "touch.h"
@@ -29,12 +30,23 @@ void app_main(void)
     ESP_ERROR_CHECK(ui_init());
     ui_set_state(UI_STATE_IDLE);
 
+    // Map the SR model partition (WakeNet) and CREATE the model BEFORE any I2S
+    // DMA. The prebuilt wakenet lib parses the hufzip header via strcmp on
+    // pointers into the flash-mmap model; if I2S DMA is already running it
+    // invalidates the flash cache and those reads return garbage, corrupting the
+    // model params (intermittent LoadProhibited in the SysTick ISR).
+    // Order: model create -> audio init/test tone -> capture task -> detection.
+    srmodel_list_t *srmodels = esp_srmodel_init("model");
+    if (!srmodels) {
+        ESP_LOGW(TAG, "esp_srmodel_init failed — wake word disabled, touch only");
+    }
+    ESP_ERROR_CHECK(wake_init());
+
     ESP_ERROR_CHECK(audio_init());
     audio_play_test_tone(440, 600);   /* A4 beep — confirms speaker path */
 
-    // Start audio capture and wake detection immediately — independent of network
+    // Start audio capture and wake detection — independent of network
     audio_start_capture_task();
-    ESP_ERROR_CHECK(wake_init());
     wake_start_detection_task();
 
     // Touch controller (after ui_init which sets up I2C bus)
