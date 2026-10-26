@@ -5,6 +5,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "net.h"
+#include "ui.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "WIFI";
@@ -27,12 +28,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             s_retry_count++;
             ESP_LOGW(TAG, "Retry Wi-Fi connection (%d/%d)", s_retry_count, MAX_RETRY);
         } else {
+            ESP_LOGE(TAG, "Wi-Fi connection failed after %d retries", MAX_RETRY);
+            ui_set_state(UI_STATE_ERROR);
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry_count = 0;
+        ui_set_state(UI_STATE_IDLE);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -65,17 +69,8 @@ esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Connecting to SSID: %s", CONFIG_HERVOICE_WIFI_SSID);
 
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(30000));
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Wi-Fi connected");
-        return ESP_OK;
-    } else {
-        ESP_LOGE(TAG, "Wi-Fi connection failed");
-        return ESP_ERR_TIMEOUT;
-    }
+    ESP_LOGI(TAG, "Connecting to SSID: %s (non-blocking; UI follows connect state)",
+             CONFIG_HERVOICE_WIFI_SSID);
+    return ESP_OK;
 }

@@ -55,10 +55,12 @@ void app_main(void)
         ESP_LOGW(TAG, "touch_init failed: %s (continuing without touch)", esp_err_to_name(ret));
     }
 
-    // net_init blocks until connected or all retries exhausted
+    // net_init is non-blocking: it starts WiFi and returns. The face reflects
+    // real connect state — WIFI event handler sets ERROR on give-up, IDLE on
+    // GOT_IP (see wifi.c).
     ret = net_init();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "net_init failed, will retry in background");
+        ESP_LOGW(TAG, "net_init failed: %s", esp_err_to_name(ret));
         ui_set_state(UI_STATE_ERROR);
     }
 
