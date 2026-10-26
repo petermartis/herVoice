@@ -83,8 +83,10 @@ class Session:
             self.state = SessionState.DONE
 
         except asyncio.IncompleteReadError:
-            log.warning("[%s] Client disconnected mid-session", self.session_id)
+            # Client went away: propagate so handle_client() closes the loop
+            log.info("[%s] Client disconnected mid-session", self.session_id)
             self.state = SessionState.ERROR
+            raise
         except Exception as e:
             log.exception("[%s] Session error: %s", self.session_id, e)
             self.state = SessionState.ERROR

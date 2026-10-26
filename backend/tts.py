@@ -51,7 +51,7 @@ class PiperTTS:
         payload = {"text": text, "lang": "sk" if lang == "sk" else "en"}
 
         url = f"{config.PIPER_SERVER_URL.rstrip('/')}/synthesize"
-        log.debug("TTS POST %s  voice=%s  text=%r", url, payload["voice"], text[:80])
+        log.debug("TTS POST %s  lang=%s  text=%r", url, payload["lang"], text[:80])
 
         session = self._get_session()
         try:

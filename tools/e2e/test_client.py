@@ -88,7 +88,8 @@ def main() -> None:
         elif ftype == 0x11:
             break
         elif ftype == 0x20:
-            print(f"SERVER ERROR: code={payload[0]} {payload[1:].decode(errors=replace)}")
+            err = payload[1:].decode('replace')
+            print(f'SERVER ERROR: code={payload[0]} {err}')
             sys.exit(1)
         else:
             print(f"unexpected frame 0x{ftype:02x}, skipping {len(payload)} bytes")
