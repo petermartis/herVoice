@@ -37,7 +37,9 @@ class TTSService:
         # Piper (Slovak)
         t0 = time.perf_counter()
         import piper
-        self._piper = piper.PiperVoice.load("sk_SK-lili-medium")
+        import os
+        voice_path = os.environ.get("PIPER_VOICE_PATH", "/home/foscam/herVoice/piper-voices/sk_SK-lili-medium.onnx")
+        self._piper = piper.PiperVoice.load(voice_path)
         self._piper_rate = self._piper.config.sample_rate
         log.info("Piper sk_SK-lili-medium loaded in %.1fs (rate=%d)",
                  time.perf_counter() - t0, self._piper_rate)
