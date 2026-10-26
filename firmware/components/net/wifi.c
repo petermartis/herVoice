@@ -17,21 +17,26 @@ static const char *TAG = "WIFI";
 static EventGroupHandle_t s_wifi_event_group = NULL;
 static int                s_retry_count      = 0;
 
+static void wifi_reconnect_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_wifi_connect();
+    vTaskDelete(NULL);
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_count < MAX_RETRY) {
-            esp_wifi_connect();
-            s_retry_count++;
-            ESP_LOGW(TAG, "Retry Wi-Fi connection (%d/%d)", s_retry_count, MAX_RETRY);
-        } else {
-            ESP_LOGE(TAG, "Wi-Fi connection failed after %d retries", MAX_RETRY);
-            ui_set_state(UI_STATE_ERROR);
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-        }
+        /* Never give up: a voice endpoint must recover from router blips.
+         * Show Error only while disconnected; GOT_IP flips it back to IDLE.
+         * Reconnect from a helper task (no delays in the event handler). */
+        s_retry_count++;
+        ESP_LOGW(TAG, "Disconnected, reconnecting (attempt %d)", s_retry_count);
+        ui_set_state(UI_STATE_ERROR);
+        xTaskCreate(wifi_reconnect_task, "wifi_reconn", 4096, NULL, 5, NULL);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&ev->ip_info.ip));
