@@ -50,7 +50,7 @@ class TTSService:
         parts = [r.audio.cpu().numpy().astype(np.float32) for r in self._kokoro(text, voice="af_heart")]
         samples = np.concatenate(parts) if parts else np.zeros(0, np.float32)
         pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
-        return _wav(pcm, 24000)
+        return _wav(pcm, 24000), 24000
 
     def synth_sk(self, text: str) -> tuple[bytes, int]:
         """Piper -> (wav_bytes, native rate)."""
