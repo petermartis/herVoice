@@ -48,14 +48,7 @@ class PiperTTS:
             yield _stub_pcm(text, output_sample_rate)
             return
 
-        if lang == "sk":
-            payload = {"text": text, "voice": config.PIPER_VOICE_SK}
-        else:
-            payload = {
-                "text":       text,
-                "voice":      config.PIPER_VOICE_EN,
-                "speaker_id": config.PIPER_SPEAKER_ID_EN,
-            }
+        payload = {"text": text, "lang": "sk" if lang == "sk" else "en"}
 
         url = f"{config.PIPER_SERVER_URL.rstrip('/')}/synthesize"
         log.debug("TTS POST %s  voice=%s  text=%r", url, payload["voice"], text[:80])

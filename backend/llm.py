@@ -49,6 +49,12 @@ class LlamaLLM:
                 {"role": "user",
                  "content": _SK_HINT + messages[-1]["content"]}
             ]
+        if config.LLM_NO_THINK and messages and messages[-1]["role"] == "user":
+            # Qwen3 thinking models: /no_think skips reasoning tokens (voice latency)
+            messages = messages[:-1] + [
+                {"role": "user",
+                 "content": messages[-1]["content"] + " /no_think"}
+            ]
 
         payload = {
             "model":       config.LLM_MODEL,
