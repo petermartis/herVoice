@@ -46,9 +46,8 @@ class TTSService:
 
     def synth_en(self, text: str) -> tuple[bytes, int]:
         """Kokoro -> (wav_bytes, sample_rate=24000)."""
-        audio = self._kokoro(text, voice="af_heart")
-        # audio: iterable of torch tensors (24kHz mono)
-        parts = [a.cpu().numpy().astype(np.float32) for a in audio]
+        # kokoro 0.9.x yields Result objects; .audio is a torch tensor (24kHz mono)
+        parts = [r.audio.cpu().numpy().astype(np.float32) for r in self._kokoro(text, voice="af_heart")]
         samples = np.concatenate(parts) if parts else np.zeros(0, np.float32)
         pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
         return _wav(pcm, 24000)
@@ -57,7 +56,7 @@ class TTSService:
         """Piper -> (wav_bytes, native rate)."""
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
-            self._piper.synthesize(text, wf)
+            self._piper.synthesize_wav(text, wf)
         return buf.getvalue(), self._piper_rate
 
     def synthesize(self, text: str, lang: str) -> bytes:
