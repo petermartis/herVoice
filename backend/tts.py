@@ -20,6 +20,18 @@ except ImportError:
 
 import config
 
+_SK_CHARS = frozenset("áčďéíľňôšťúýžÁČĎÉÍĽŇÔŠŤÚÝŽ")
+
+def _voice_lang(text, requested):
+    # TTS voice follows the language of the TEXT (ground truth), not just the
+    # requested lang. STT mis-detection can pass the wrong lang; the reply text
+    # decides which voice. Slovak diacritics -> sk (ElevenLabs SK); otherwise use
+    # the requested lang (English -> Kokoro).
+    if any(c in _SK_CHARS for c in text):
+        return "sk"
+    return requested
+
+
 CHUNK_SAMPLES = 800   # 50ms @ 16kHz
 CHUNK_BYTES   = CHUNK_SAMPLES * 2  # 16-bit
 
@@ -48,7 +60,8 @@ class PiperTTS:
             yield _stub_pcm(text, output_sample_rate)
             return
 
-        payload = {"text": text, "lang": "sk" if lang == "sk" else "en"}
+        _eff = _voice_lang(text, lang)
+        payload = {"text": text, "lang": "sk" if _eff == "sk" else "en"}
 
         url = f"{config.PIPER_SERVER_URL.rstrip('/')}/synthesize"
         log.debug("TTS POST %s  lang=%s  text=%r", url, payload["lang"], text[:80])

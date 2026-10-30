@@ -48,9 +48,12 @@ class WhisperSTT:
         log.info("STT: using whisper-server at %s", config.WHISPER_SERVER_URL)
 
     async def transcribe(self, audio_bytes: bytes,
-                         sample_rate: int = 16000) -> Tuple[str, str]:
+                         sample_rate: int = 16000,
+                         language: str = "auto") -> Tuple[str, str]:
         """
         Transcribe raw PCM bytes (16-bit LE mono) to text via whisper-server.
+        language: 'auto' or forced ('sk'/'en') — follow-up turns force the
+        known conversation language (no detection pass, no mis-detect).
         Returns (text, language) — language is 'sk', 'en', etc.
         Returns ("", "sk") on failure or empty audio.
         """
@@ -68,7 +71,7 @@ class WhisperSTT:
         form.add_field("file", wav_bytes,
                        filename="audio.wav",
                        content_type="audio/wav")
-        form.add_field("language", "auto")
+        form.add_field("language", language)
 
         session = self._get_session()
         try:
