@@ -421,7 +421,7 @@ static void net_stream_task(void *arg)
         if (evt.type != WAKE_EVENT_WAKEWORD_DETECTED) continue;
 
         ESP_LOGI(TAG, "Wake event received, opening session");
-        ui_set_state(UI_STATE_WAKE);
+        ui_set_state(UI_STATE_IDLE);
         wake_detection_suspend(); /* session owns the mic ring */
 
         /* Connect with exponential backoff */

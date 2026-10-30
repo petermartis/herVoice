@@ -270,7 +270,6 @@ static esp_lcd_panel_handle_t  s_panel         = NULL;
 static lv_disp_t              *s_disp          = NULL;
 static lv_obj_t               *s_screen        = NULL;
 static lv_obj_t               *s_state_label   = NULL;
-static lv_obj_t               *s_sub_label     = NULL;
 static lv_obj_t               *s_pulse_circle  = NULL;
 static SemaphoreHandle_t       s_lvgl_mutex    = NULL;
 static volatile ui_state_t     s_current_state = UI_STATE_IDLE;
@@ -408,9 +407,9 @@ static void lvgl_tick_cb(void *arg)
 /* ── State rendering ────────────────────────────────────────────────────────── */
 
 static const char *s_state_labels[UI_STATE_COUNT] = {
+    "Ready",
+    "Ready",
     "Listening...",
-    "Wake!",
-    "Recording...",
     "Processing...",
     "Speaking...",
     "Error",
@@ -419,7 +418,7 @@ static const char *s_state_labels[UI_STATE_COUNT] = {
 /* RGB888 background colors per state */
 static const struct { uint8_t r, g, b; } s_state_colors[UI_STATE_COUNT] = {
     {  0,  80,  0  },  /* IDLE     — dark green  */
-    {180, 160,  0  },  /* WAKE     — amber       */
+    {  0,  80,  0  },  /* WAKE     — dark green  */
     {160,   0,  0  },  /* RECORDING— dark red    */
     {  0,   0, 140 },  /* SENDING  — blue        */
     {  0, 120, 120 },  /* PLAYING  — teal        */
@@ -483,11 +482,11 @@ static void lvgl_task(void *arg)
                 if (s_current_state == UI_STATE_RECORDING || s_current_state == UI_STATE_PLAYING) {
                     lv_obj_set_size(s_pulse_circle, size, size);
                     if (s_current_state == UI_STATE_RECORDING) {
-                        lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(255, 80, 80), LV_PART_MAIN);
-                        lv_obj_set_style_bg_opa(s_pulse_circle, 85, LV_PART_MAIN);
+                        lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(255, 140, 140), LV_PART_MAIN);
+                        lv_obj_set_style_bg_opa(s_pulse_circle, 115, LV_PART_MAIN);
                     } else {
-                        lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(0, 200, 200), LV_PART_MAIN);
-                        lv_obj_set_style_bg_opa(s_pulse_circle, 100, LV_PART_MAIN);
+                        lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(130, 255, 255), LV_PART_MAIN);
+                        lv_obj_set_style_bg_opa(s_pulse_circle, 145, LV_PART_MAIN);
                     }
                     lv_obj_clear_flag(s_pulse_circle, LV_OBJ_FLAG_HIDDEN);
                 } else {
@@ -631,7 +630,7 @@ esp_err_t ui_init(void)
     /* Pulse circle for voice cadence visualizer */
     s_pulse_circle = lv_obj_create(s_screen);
     lv_obj_set_size(s_pulse_circle, 60, 60);
-    lv_obj_align(s_pulse_circle, LV_ALIGN_CENTER, 0, 75);
+    lv_obj_align(s_pulse_circle, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_radius(s_pulse_circle, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_pulse_circle, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(s_pulse_circle, 0, LV_PART_MAIN);
@@ -640,11 +639,7 @@ esp_err_t ui_init(void)
     s_state_label = lv_label_create(s_screen);
     lv_obj_set_style_text_color(s_state_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_28, LV_PART_MAIN);
-    lv_obj_align(s_state_label, LV_ALIGN_CENTER, 0, -15);
-
-    s_sub_label = lv_label_create(s_screen);
-    lv_obj_set_style_text_color(s_sub_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_align(s_sub_label, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(s_state_label, LV_ALIGN_CENTER, 0, 0);
 
     /* Render IDLE state immediately */
     apply_state(UI_STATE_IDLE);
