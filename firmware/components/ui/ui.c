@@ -480,7 +480,17 @@ static void lvgl_task(void *arg)
                 if (size > 220) size = 220;
                 
                 if (s_current_state == UI_STATE_RECORDING || s_current_state == UI_STATE_PLAYING) {
-                    lv_obj_set_size(s_pulse_circle, size, size);
+                    static int64_t last_update_us = 0;
+                    static int last_size = 0;
+                    int64_t now_us = esp_timer_get_time();
+                    /* Pace redraws to 20 FPS (50ms) to completely eliminate QSPI DMA / memory bus contention */
+                    if (now_us - last_update_us >= 50000 || size == 25) {
+                        last_update_us = now_us;
+                        if (size != last_size) {
+                            lv_obj_set_size(s_pulse_circle, size, size);
+                            last_size = size;
+                        }
+                    }
                     if (s_current_state == UI_STATE_RECORDING) {
                         lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(255, 140, 140), LV_PART_MAIN);
                         lv_obj_set_style_bg_opa(s_pulse_circle, 115, LV_PART_MAIN);
