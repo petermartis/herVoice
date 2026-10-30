@@ -73,7 +73,12 @@ esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-
+    /* Keep the radio always on: the ESP-IDF default (WIFI_PS_MIN_MODE,
+     * modem sleep) makes the STA wake only at beacon intervals (~100 ms),
+     * which throttles TCP to a few KB/s and bursts TTS delivery at
+     * ~0.2x real-time -> choppy audio. Device is mains-powered. */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_LOGI(TAG, "WiFi power save disabled (WIFI_PS_NONE)");
 
     ESP_LOGI(TAG, "Connecting to SSID: %s (non-blocking; UI follows connect state)",
              CONFIG_HERVOICE_WIFI_SSID);

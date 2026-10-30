@@ -9,6 +9,7 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -47,6 +48,7 @@ static const char *TAG = "UI";
 #define TCA9554_REG_OUTPUT  0x01
 #define TCA9554_REG_CONFIG  0x03
 #define TCA9554_EXIO2_BIT   (1 << 1)  /* P1 = EXIO2; Waveshare: (1<<(pin-1)) with pin=2 */
+#define TCA9554_EXIO1_BIT   (1 << 0)  /* P0 = EXIO1 = touch CST816S RST (active-low) — keep HIGH */
 
 /* ── LCD geometry ───────────────────────────────────────────────────────────── */
 #define LCD_H_RES       360
@@ -273,6 +275,8 @@ static SemaphoreHandle_t       s_lvgl_mutex    = NULL;
 static volatile ui_state_t     s_current_state = UI_STATE_IDLE;
 static volatile ui_state_t     s_pending_state = UI_STATE_IDLE;
 static volatile bool           s_state_changed = false;
+static volatile int64_t        s_vol_flash_until = 0;  /* esp_timer us; 0 = off */
+static char                    s_vol_flash_text[16];
 
 static lv_disp_drv_t           s_disp_drv;
 static lv_disp_draw_buf_t      s_draw_buf_desc;
@@ -324,7 +328,8 @@ static esp_err_t tca9554_set_exio2(bool level)
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (TCA9554_ADDR << 1) | I2C_MASTER_WRITE, true);
     buf[0] = TCA9554_REG_OUTPUT;
-    buf[1] = level ? TCA9554_EXIO2_BIT : 0x00;
+    /* Keep EXIO1 (touch RST) deasserted — dropping it holds the CST816S in reset */
+    buf[1] = (level ? TCA9554_EXIO2_BIT : 0x00) | TCA9554_EXIO1_BIT;
     i2c_master_write(cmd, buf, 2, true);
     i2c_master_stop(cmd);
     ret = i2c_master_cmd_begin(TCA9554_I2C_NUM, cmd, pdMS_TO_TICKS(10));
@@ -428,7 +433,11 @@ static void apply_state(ui_state_t state)
                       s_state_colors[state].g,
                       s_state_colors[state].b),
         LV_PART_MAIN);
-    lv_label_set_text(s_state_label, s_state_labels[state]);
+    if (esp_timer_get_time() < s_vol_flash_until) {
+        lv_label_set_text(s_state_label, s_vol_flash_text);  /* "Volume X" */
+    } else {
+        lv_label_set_text(s_state_label, s_state_labels[state]);
+    }
     s_current_state = state;
 }
 
@@ -443,6 +452,10 @@ static void lvgl_task(void *arg)
             if (s_state_changed) {
                 apply_state(s_pending_state);
                 s_state_changed = false;
+            }
+            if (s_vol_flash_until && esp_timer_get_time() >= s_vol_flash_until) {
+                s_vol_flash_until = 0;
+                apply_state(s_current_state);  /* flash expired: restore text */
             }
             lv_timer_handler();
             xSemaphoreGive(s_lvgl_mutex);
@@ -617,4 +630,13 @@ void ui_set_state(ui_state_t state)
 ui_state_t ui_get_state(void)
 {
     return s_current_state;
+}
+
+void ui_show_volume(int vol)
+{
+    if (vol < 0)   vol = 0;
+    if (vol > 100) vol = 100;
+    snprintf(s_vol_flash_text, sizeof(s_vol_flash_text), "Volume %d", vol);
+    s_vol_flash_until = esp_timer_get_time() + 1200000;  /* 1.2 s */
+    s_state_changed = true;   /* force an immediate re-render */
 }

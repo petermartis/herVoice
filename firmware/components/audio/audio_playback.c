@@ -6,10 +6,12 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "es8311.h"
 #include "audio.h"
 #include "ring_buffer.h"
 #include "sdkconfig.h"
+#include "nvs.h"
 
 static const char *TAG = "AUDIO_PLAY";
 
@@ -27,7 +29,7 @@ static const char *TAG = "AUDIO_PLAY";
 
 #define SAMPLE_RATE         CONFIG_HERVOICE_SAMPLE_RATE
 #define PLAYBACK_CHUNK      512
-#define PLAYBACK_BUF_SAMPLES 8192
+#define PLAYBACK_BUF_SAMPLES 32768  /* 2.048 s @ 16 kHz — absorbs the bridge's burst */
 #define PLAYBACK_TASK_STACK 8192
 #define PLAYBACK_TASK_PRIO  6
 
@@ -35,6 +37,33 @@ static i2s_chan_handle_t  s_tx_chan = NULL;
 static ring_buf_t         s_playback_ring;
 static TaskHandle_t       s_playback_task_handle = NULL;
 static volatile bool      s_flush_requested = false;
+static es8311_handle_t    s_es8311 = NULL;
+static int                s_volume = 60;   /* speaker volume 0-100, NVS-persisted */
+
+/* ── Volume persistence (NVS ns "hervoice", key "vol") ── */
+static int volume_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("hervoice", NVS_READONLY, &h) == ESP_OK) {
+        uint32_t v = 60;
+        if (nvs_get_u32(h, "vol", &v) == ESP_OK && v <= 100) {
+            nvs_close(h);
+            return (int)v;
+        }
+        nvs_close(h);
+    }
+    return 60;
+}
+
+static void volume_save(int v)
+{
+    nvs_handle_t h;
+    if (nvs_open("hervoice", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u32(h, "vol", (uint32_t)v);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
 
 static void playback_task(void *arg)
 {
@@ -42,6 +71,8 @@ static void playback_task(void *arg)
     int16_t mono[PLAYBACK_CHUNK];
     int16_t stereo[PLAYBACK_CHUNK * 2];
     size_t  bytes_written;
+    int32_t peak = 0;
+    uint32_t iters = 0;
 
     ESP_LOGI(TAG, "Playback task started");
     while (1) {
@@ -57,10 +88,19 @@ static void playback_task(void *arg)
                 int16_t s = (i < got) ? mono[i] : 0;
                 stereo[i * 2]     = s;
                 stereo[i * 2 + 1] = s;
+                int32_t a = s < 0 ? -s : s;
+                if (a > peak) peak = a;
             }
         }
-        i2s_channel_write(s_tx_chan, stereo, sizeof(stereo),
-                          &bytes_written, portMAX_DELAY);
+        esp_err_t wr = i2s_channel_write(s_tx_chan, stereo, sizeof(stereo),
+                                         &bytes_written, pdMS_TO_TICKS(100));
+        if (wr != ESP_OK) {
+            ESP_LOGW(TAG, "i2s write err: %s (wrote %lu)", esp_err_to_name(wr), (unsigned long)bytes_written);
+        }
+        if (++iters % 200 == 0) {
+            ESP_LOGI(TAG, "PLAY_ALIVE iters=%lu peak=%ld", (unsigned long)iters, (long)peak);
+            peak = 0;
+        }
     }
 }
 
@@ -69,16 +109,50 @@ esp_err_t audio_playback_init(i2s_chan_handle_t tx_chan)
 {
     s_tx_chan = tx_chan;
 
-    esp_err_t ret = ring_buf_init(&s_playback_ring, PLAYBACK_BUF_SAMPLES);
+    /* Headroom ring: the bridge bursts the whole TTS reply in <0.2 s, so a
+     * small ring starves while the net task paces it in. Keep the 2 s PCM
+     * buffer in PSRAM; allocating it from internal DRAM leaves too little
+     * contiguous memory for esp_wifi_init(). The playback task copies each
+     * chunk into its internal stack buffer before the I2S DMA write. */
+    ESP_LOGI(TAG, "HEAP: psram_total=%lu psram_free=%lu int_free=%lu",
+             (unsigned long)heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    size_t ring_samples = PLAYBACK_BUF_SAMPLES;
+    esp_err_t ret = ring_buf_init_cap(&s_playback_ring, ring_samples,
+                                      MALLOC_CAP_SPIRAM);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "2 s PSRAM ring failed (%s) — falling back to 1 s PSRAM",
+                 esp_err_to_name(ret));
+        ring_samples = 16384; /* 1.024 s */
+        ret = ring_buf_init_cap(&s_playback_ring, ring_samples,
+                                MALLOC_CAP_SPIRAM);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "1 s PSRAM ring failed (%s) — falling back to 1 s internal",
+                 esp_err_to_name(ret));
+        ring_samples = 16384; /* 1.024 s */
+        ret = ring_buf_init_cap(&s_playback_ring, ring_samples,
+                                MALLOC_CAP_INTERNAL);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "1 s ring failed (%s) — falling back to 0.5 s internal",
+                 esp_err_to_name(ret));
+        ring_samples = 8192; /* 0.512 s */
+        ret = ring_buf_init_cap(&s_playback_ring, ring_samples,
+                                MALLOC_CAP_INTERNAL);
+    }
     if (ret != ESP_OK) return ret;
+    ESP_LOGI(TAG, "playback ring ready: %lu samples (%.2f s)",
+             (unsigned long)ring_samples, (double)ring_samples / 16000.0);
 
     /* ── ES8311 speaker codec ────────────────────────────────────────────
      * I2C bus already up (400 kHz, installed by ui_init → tca9554_init).
      * ES8311_ADDRRES_0 = 0x18 (CE pin low on this board).
      * MCLK is already running (ESP32 drives GPIO2) by the time we reach here.
      */
-    es8311_handle_t es8311_handle = es8311_create(I2C_PORT, ES8311_ADDRRES_0);
-    if (es8311_handle == NULL) {
+    s_es8311 = es8311_create(I2C_PORT, ES8311_ADDRRES_0);
+    if (s_es8311 == NULL) {
         ESP_LOGE(TAG, "es8311_create failed");
         return ESP_ERR_NO_MEM;
     }
@@ -90,15 +164,16 @@ esp_err_t audio_playback_init(i2s_chan_handle_t tx_chan)
         .mclk_frequency     = SAMPLE_RATE * 256,  /* 4 096 000 Hz */
         .sample_frequency   = SAMPLE_RATE,
     };
-    ret = es8311_init(es8311_handle, &es8311_clk,
+    ret = es8311_init(s_es8311, &es8311_clk,
                       ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "es8311_init: %s", esp_err_to_name(ret));
         return ret;
     }
 
+    s_volume = volume_load();
     int vol_actual = 0;
-    es8311_voice_volume_set(es8311_handle, 50, &vol_actual);
+    es8311_voice_volume_set(s_es8311, s_volume, &vol_actual);
     ESP_LOGI(TAG, "ES8311 ready — speaker at %u Hz, volume=%d", SAMPLE_RATE, vol_actual);
 
     /* ── PA_EN: drive GPIO15 HIGH to unmute the power amplifier ─────── */
@@ -144,7 +219,19 @@ void audio_play_test_tone(uint32_t freq_hz, uint32_t duration_ms)
 
 void audio_play_frames(const int16_t *buf, size_t samples)
 {
-    ring_buf_write(&s_playback_ring, buf, samples);
+    /* Paced: block while the ring is full so the incoming TTS stream is
+     * throttled to real-time playback (TCP backpressure). 5 s timeout
+     * guards against a dead bridge wedging the net task forever. */
+    size_t w = ring_buf_write_paced(&s_playback_ring, buf, samples, 5000);
+    if (w < samples) {
+        ESP_LOGW(TAG, "playback pacing timeout: %u/%u samples written",
+                 (unsigned)w, (unsigned)samples);
+    }
+}
+
+size_t audio_playback_available(void)
+{
+    return ring_buf_available(&s_playback_ring);
 }
 
 void audio_playback_flush(void)
@@ -154,4 +241,23 @@ void audio_playback_flush(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     vTaskDelay(pdMS_TO_TICKS(50));  /* extra for DMA drain */
+}
+
+void audio_set_volume(int percent)
+{
+    if (percent < 0)   percent = 0;
+    if (percent > 100) percent = 100;
+    if (percent == s_volume) return;
+    s_volume = percent;
+    int vol_actual = 0;
+    if (s_es8311) {
+        es8311_voice_volume_set(s_es8311, s_volume, &vol_actual);
+    }
+    volume_save(s_volume);
+    ESP_LOGI(TAG, "Volume set to %d (codec %d)", s_volume, vol_actual);
+}
+
+int audio_get_volume(void)
+{
+    return s_volume;
 }

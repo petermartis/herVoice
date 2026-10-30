@@ -27,11 +27,18 @@ size_t audio_get_frames(int16_t *buf, size_t samples, TickType_t timeout_ticks);
  */
 void audio_play_frames(const int16_t *buf, size_t samples);
 
+/* Samples currently queued for playback */
+size_t audio_playback_available(void);
+
 /* Flush pending playback samples (blocks until drained) */
 void audio_playback_flush(void);
 
 /* Play a sine-wave test tone — blocks until samples are queued */
 void audio_play_test_tone(uint32_t freq_hz, uint32_t duration_ms);
+
+/* Speaker volume 0-100 — applied immediately, persisted to NVS */
+void audio_set_volume(int percent);
+int  audio_get_volume(void);
 
 #ifdef __cplusplus
 }

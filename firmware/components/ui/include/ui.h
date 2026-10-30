@@ -30,6 +30,12 @@ void ui_set_state(ui_state_t state);
 /** Returns current state */
 ui_state_t ui_get_state(void);
 
+/**
+ * Briefly show "Volume X" on the face (1.2 s) then restore the normal
+ * state text. Thread-safe - called from the touch task on volume swipes.
+ */
+void ui_show_volume(int vol);
+
 #ifdef __cplusplus
 }
 #endif

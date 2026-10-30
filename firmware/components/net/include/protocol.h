@@ -13,6 +13,7 @@ extern "C" {
 #define FRAME_PCM_UP_END      0x02
 #define FRAME_PCM_DOWN        0x10
 #define FRAME_PCM_DOWN_END    0x11
+#define FRAME_REPLY_META      0x12  /* 1-byte payload: 1 = LLM expects user reply */
 #define FRAME_ERROR           0x20
 
 /* Protocol version */

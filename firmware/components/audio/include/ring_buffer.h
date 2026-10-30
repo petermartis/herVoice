@@ -16,11 +16,15 @@ typedef struct {
     volatile size_t  tail;       /* read pos */
     SemaphoreHandle_t mutex;
     SemaphoreHandle_t data_avail; /* counting semaphore */
+    SemaphoreHandle_t space_avail; /* free-slot counting semaphore */
 } ring_buf_t;
 
 esp_err_t ring_buf_init(ring_buf_t *rb, size_t capacity_samples);
+esp_err_t ring_buf_init_cap(ring_buf_t *rb, size_t capacity_samples, uint32_t cap_mask);
 void      ring_buf_free(ring_buf_t *rb);
 size_t    ring_buf_write(ring_buf_t *rb, const int16_t *data, size_t samples);
+size_t    ring_buf_write_paced(ring_buf_t *rb, const int16_t *data, size_t samples,
+                                 uint32_t timeout_ms);
 size_t    ring_buf_read(ring_buf_t *rb, int16_t *data, size_t samples, TickType_t timeout);
 size_t    ring_buf_available(ring_buf_t *rb);
 void      ring_buf_clear(ring_buf_t *rb);

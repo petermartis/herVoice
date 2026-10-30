@@ -6,7 +6,7 @@
 #include "nvs_flash.h"
 #include "audio.h"
 #include "wake.h"
-#include "model_path.h"   /* esp-sr: map the model partition so WakeNet can load */"
+#include "model_path.h"   /* esp-sr: map the model partition so WakeNet can load */
 #include "net.h"
 #include "ui.h"
 #include "touch.h"

@@ -7,11 +7,16 @@ import asyncio
 import logging
 import signal
 import sys
+from typing import Optional
 
 import config
+from protocol import (
+    recv_frame, parse_session_start,
+    FRAME_SESSION_START, FrameError,
+)
 from session import Session
 from stt import WhisperSTT
-from llm import LlamaLLM
+from llm import make_llm
 from tts import PiperTTS
 
 logging.basicConfig(
@@ -25,7 +30,7 @@ log = logging.getLogger("SERVER")
 class HerVoiceServer:
     def __init__(self):
         self.stt = WhisperSTT()
-        self.llm = LlamaLLM()
+        self.llm = make_llm()
         self.tts = PiperTTS()
         # Per-device conversation history keyed by device_id
         self._histories: dict[int, list] = {}
@@ -47,18 +52,38 @@ class HerVoiceServer:
         peer = writer.get_extra_info("peername")
         log.info("New connection from %s:%s", *peer)
 
-        # Each device connection keeps its conversation context alive across sessions
-        # We peek at the session start to get device_id before creating Session
-        history: list = []  # will be updated after first session_start
+        # Each device connection keeps its conversation context alive
+        # across sessions. We peek at the first session start to learn
+        # device_id BEFORE creating the Session, so EVERY session
+        # (including the first) runs on the per-device history - system
+        # prompt plus all prior turns.
+        history: Optional[list] = None
+        # Normalized language of the last real transcript on this
+        # connection - inherited by follow-up turns.
+        convo_lang: Optional[str] = None
 
         while True:
             try:
-                session = Session(reader, writer, self.stt, self.llm, self.tts, history)
+                if history is None:
+                    ftype, payload = await recv_frame(reader)
+                    if ftype != FRAME_SESSION_START:
+                        raise FrameError(
+                            f"Expected session start (0x00), got 0x{ftype:02x}")
+                    device_id = parse_session_start(payload)["device_id"]
+                    history = self._get_history(device_id)
+                    session = Session(reader, writer, self.stt, self.llm,
+                                      self.tts, history,
+                                      first_frame=(ftype, payload),
+                                      sticky_lang=convo_lang)
+                else:
+                    session = Session(reader, writer, self.stt, self.llm,
+                                      self.tts, history,
+                                      sticky_lang=convo_lang)
                 await session.run()
-                # Update history reference after session populates device_id
-                history = self._get_history(session.device_id)
-                session.history = history
-            except (ConnectionResetError, asyncio.IncompleteReadError, BrokenPipeError):
+                if session.lang_confirmed:
+                    convo_lang = session.lang
+            except (ConnectionResetError, asyncio.IncompleteReadError,
+                    BrokenPipeError, FrameError):
                 log.info("Client %s:%s disconnected", *peer)
                 break
             except Exception as e:

@@ -38,7 +38,7 @@ static const char *TAG = "AUDIO_CAP";
 #define DMA_BUF_SAMPLES     512
 #define DMA_BUF_COUNT       4
 #define RING_BUF_SAMPLES    (SAMPLE_RATE / 2)   /* 500 ms mono */
-#define CAPTURE_TASK_STACK  4096
+#define CAPTURE_TASK_STACK  6144
 #define CAPTURE_TASK_PRIO   5
 #define RMS_REPORT_MS       1000   /* log mic RMS every second */
 
@@ -52,9 +52,12 @@ esp_err_t audio_playback_init(i2s_chan_handle_t tx_chan);
 
 static void capture_task(void *arg)
 {
-    /* ES7210 outputs stereo: L=MIC1, R=MIC2 interleaved */
-    int16_t dma_buf[DMA_BUF_SAMPLES * 2];
-    int16_t mono_buf[DMA_BUF_SAMPLES];
+    /* ES7210 outputs stereo: L=MIC1, R=MIC2 interleaved.
+     * static (task is a singleton): 3 KB of locals on the 4 KB stack
+     * overflowed it once log formatting ran -> core-1 double-exception
+     * boot loop (build22). */
+    static int16_t dma_buf[DMA_BUF_SAMPLES * 2];
+    static int16_t mono_buf[DMA_BUF_SAMPLES];
     size_t  bytes_read;
 
     /* RMS tracking */
@@ -72,6 +75,15 @@ static void capture_task(void *arg)
             continue;
         }
         size_t frames = (bytes_read / sizeof(int16_t)) / 2;
+        /* DEBUG build21: prove the capture task got its first I2S read */
+        {
+            static bool first_read_logged = false;
+            if (!first_read_logged) {
+                first_read_logged = true;
+                ESP_LOGI(TAG, "First I2S read OK: %u bytes (mic path alive)",
+                         (unsigned)bytes_read);
+            }
+        }
 
         /* Average L and R → mono, accumulate energy */
         for (size_t i = 0; i < frames; i++) {

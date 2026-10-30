@@ -51,19 +51,19 @@ menu "herVoice Configuration"
 
     config HERVOICE_VAD_START_THRESHOLD
         int "VAD Speech Start Threshold"
-        default 500
+        default 1500
         help
             Energy threshold above which speech is considered to have started.
 
     config HERVOICE_VAD_STOP_THRESHOLD
         int "VAD Speech Stop Threshold"
-        default 300
+        default 700
         help
             Energy threshold below which speech is considered to have stopped.
 
     config HERVOICE_VAD_SILENCE_TIMEOUT_MS
         int "VAD Silence Timeout (ms)"
-        default 1500
+        default 600
         help
             Duration of silence in milliseconds before ending a speech segment.
 

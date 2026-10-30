@@ -32,6 +32,8 @@ QueueHandle_t wake_get_event_queue(void);
 /* VAD API used internally by wakeword.c but also accessible externally */
 bool vad_is_speech(const int16_t *samples, size_t count);
 void vad_reset(void);
+void wake_detection_suspend(void);
+void wake_detection_resume(void);
 
 #ifdef __cplusplus
 }
