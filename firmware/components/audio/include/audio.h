@@ -40,6 +40,10 @@ void audio_play_test_tone(uint32_t freq_hz, uint32_t duration_ms);
 void audio_set_volume(int percent);
 int  audio_get_volume(void);
 
+/* Real-time audio signal level for UI visualizations */
+void     audio_set_ui_level(uint32_t level);
+uint32_t audio_get_ui_level(void);
+
 #ifdef __cplusplus
 }
 #endif

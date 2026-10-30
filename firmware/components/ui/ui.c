@@ -271,6 +271,7 @@ static lv_disp_t              *s_disp          = NULL;
 static lv_obj_t               *s_screen        = NULL;
 static lv_obj_t               *s_state_label   = NULL;
 static lv_obj_t               *s_sub_label     = NULL;
+static lv_obj_t               *s_pulse_circle  = NULL;
 static SemaphoreHandle_t       s_lvgl_mutex    = NULL;
 static volatile ui_state_t     s_current_state = UI_STATE_IDLE;
 static volatile ui_state_t     s_pending_state = UI_STATE_IDLE;
@@ -457,6 +458,36 @@ static void lvgl_task(void *arg)
                 s_vol_flash_until = 0;
                 apply_state(s_current_state);  /* flash expired: restore text */
             }
+            
+            /* Real-time speech cadence pulsing circle */
+            if (s_pulse_circle) {
+                extern uint32_t audio_get_ui_level(void);
+                uint32_t raw_level = audio_get_ui_level();
+                static float smoothed_level = 0.0f;
+                if ((float)raw_level > smoothed_level) {
+                    smoothed_level = smoothed_level * 0.18f + (float)raw_level * 0.82f;
+                } else {
+                    smoothed_level = smoothed_level * 0.80f + (float)raw_level * 0.20f;
+                }
+                
+                int size = 25 + (int)(smoothed_level / 110.0f);
+                if (size > 220) size = 220;
+                
+                if (s_current_state == UI_STATE_RECORDING || s_current_state == UI_STATE_PLAYING) {
+                    lv_obj_set_size(s_pulse_circle, size, size);
+                    if (s_current_state == UI_STATE_RECORDING) {
+                        lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(255, 80, 80), LV_PART_MAIN);
+                        lv_obj_set_style_bg_opa(s_pulse_circle, 85, LV_PART_MAIN);
+                    } else {
+                        lv_obj_set_style_bg_color(s_pulse_circle, lv_color_make(0, 200, 200), LV_PART_MAIN);
+                        lv_obj_set_style_bg_opa(s_pulse_circle, 100, LV_PART_MAIN);
+                    }
+                    lv_obj_clear_flag(s_pulse_circle, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(s_pulse_circle, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
+            
             lv_timer_handler();
             xSemaphoreGive(s_lvgl_mutex);
         }
@@ -589,6 +620,15 @@ esp_err_t ui_init(void)
 
     s_screen = lv_scr_act();
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, LV_PART_MAIN);
+
+    /* Pulse circle for voice cadence visualizer */
+    s_pulse_circle = lv_obj_create(s_screen);
+    lv_obj_set_size(s_pulse_circle, 60, 60);
+    lv_obj_align(s_pulse_circle, LV_ALIGN_CENTER, 0, 75);
+    lv_obj_set_style_radius(s_pulse_circle, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_pulse_circle, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(s_pulse_circle, 0, LV_PART_MAIN);
+    lv_obj_add_flag(s_pulse_circle, LV_OBJ_FLAG_HIDDEN);
 
     s_state_label = lv_label_create(s_screen);
     lv_obj_set_style_text_color(s_state_label, lv_color_white(), LV_PART_MAIN);

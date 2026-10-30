@@ -86,12 +86,17 @@ static void capture_task(void *arg)
         }
 
         /* Average L and R → mono, accumulate energy */
+        int64_t block_energy = 0;
         for (size_t i = 0; i < frames; i++) {
             int16_t s = (int16_t)(((int32_t)dma_buf[i * 2] +
                                     (int32_t)dma_buf[i * 2 + 1]) >> 1);
             mono_buf[i] = s;
-            energy += (int32_t)s * s;
+            block_energy += (int32_t)s * s;
         }
+        energy += block_energy;
+        uint32_t block_rms = (uint32_t)sqrtf((float)(block_energy / frames));
+        audio_set_ui_level(block_rms);
+
         ring_buf_write(&s_capture_ring, mono_buf, frames);
 
         total_frames += frames;

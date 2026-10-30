@@ -39,6 +39,23 @@ static TaskHandle_t       s_playback_task_handle = NULL;
 static volatile bool      s_flush_requested = false;
 static es8311_handle_t    s_es8311 = NULL;
 static int                s_volume = 60;   /* speaker volume 0-100, NVS-persisted */
+static volatile uint32_t  s_audio_ui_level = 0;
+
+void audio_set_ui_level(uint32_t level)
+{
+    s_audio_ui_level = level;
+}
+
+uint32_t audio_get_ui_level(void)
+{
+    uint32_t val = s_audio_ui_level;
+    if (s_audio_ui_level > 50) {
+        s_audio_ui_level = (uint32_t)((float)s_audio_ui_level * 0.85f);
+    } else {
+        s_audio_ui_level = 0;
+    }
+    return val;
+}
 
 /* ── Volume persistence (NVS ns "hervoice", key "vol") ── */
 static int volume_load(void)
@@ -83,14 +100,18 @@ static void playback_task(void *arg)
                 s_flush_requested = false;
             }
             memset(stereo, 0, sizeof(stereo));
+            audio_set_ui_level(0);
         } else {
+            int32_t current_peak = 0;
             for (size_t i = 0; i < PLAYBACK_CHUNK; i++) {
                 int16_t s = (i < got) ? mono[i] : 0;
                 stereo[i * 2]     = s;
                 stereo[i * 2 + 1] = s;
                 int32_t a = s < 0 ? -s : s;
-                if (a > peak) peak = a;
+                if (a > current_peak) current_peak = a;
             }
+            if (current_peak > peak) peak = current_peak;
+            audio_set_ui_level((uint32_t)current_peak);
         }
         esp_err_t wr = i2s_channel_write(s_tx_chan, stereo, sizeof(stereo),
                                          &bytes_written, pdMS_TO_TICKS(100));
