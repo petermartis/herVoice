@@ -242,8 +242,17 @@ class HermesLLM:
             async for d in self._fallback.stream_reply(history, lang):
                 yield d
             return
-        messages = [{"role": "system", "content": config.LLM_VOICE_SYSTEM_PROMPT}]
-        messages += list(history)
+        messages = list(history)
+        if messages and messages[0].get("role") == "system":
+            messages[0] = {
+                "role": "system",
+                "content": config.LLM_VOICE_SYSTEM_PROMPT,
+            }
+        else:
+            messages.insert(0, {
+                "role": "system",
+                "content": config.LLM_VOICE_SYSTEM_PROMPT,
+            })
         emitted = False
         try:
             async for d in self.stream(messages):
