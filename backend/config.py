@@ -38,6 +38,8 @@ HERMES_API_ENABLED  = os.getenv("HERMES_API_ENABLED", "1") == "1"
 HERMES_API_URL      = os.getenv("HERMES_API_URL", "http://192.168.1.100:8642/v1/chat/completions")
 HERMES_API_KEY      = os.getenv("HERMES_API_KEY", "")   # systemd EnvironmentFile, not the repo
 HERMES_TIMEOUT_S    = int(os.getenv("HERMES_TIMEOUT_S", "45"))
+HERMES_LLM_PROVIDER = os.getenv("HERMES_LLM_PROVIDER", "nous")
+HERMES_LLM_MODEL    = os.getenv("HERMES_LLM_MODEL", "anthropic/claude-sonnet-4.6")
 # Voice is short spoken Q&A: the model's reasoning ("thinking") tokens are
 # pure latency there. chat_template_kwargs.enable_thinking=False is forwarded
 # through the gateway to llama-swap and cuts first-token time ~10x

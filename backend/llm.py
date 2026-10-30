@@ -23,11 +23,15 @@ _SK_HINT = "Odpoveď prosím po slovensky. "
 
 
 def _voice_payload(messages: list[dict]) -> dict:
-    """Streaming payload for the Hermes voice path. Thinking tokens are
-    latency for spoken Q&A, so suppress them unless disabled in config."""
-    p = {"model": config.LLM_MODEL, "messages": messages, "stream": True}
+    """Streaming payload for the Hermes commercial voice path."""
+    p = {
+        "model": config.HERMES_LLM_MODEL,
+        "provider": config.HERMES_LLM_PROVIDER,
+        "messages": messages,
+        "stream": True,
+    }
     if config.HERMES_DISABLE_THINKING:
-        p["chat_template_kwargs"] = {"enable_thinking": False}
+        p["model_options"] = {"reasoning": {"enabled": False}}
     return p
 
 
