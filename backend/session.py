@@ -3,10 +3,14 @@ Per-connection session state machine.
 Coordinates STT → LLM → TTS pipeline for one device session.
 """
 import asyncio
+import wave
+import math
+import struct
 import json
 import logging
 import re
 import time
+import os
 from enum import Enum, auto
 from typing import Optional
 
@@ -16,6 +20,8 @@ from protocol import (
     FRAME_PCM_DOWN, FRAME_PCM_DOWN_END, FRAME_REPLY_META
 )
 import config
+
+_SK_CHARS = frozenset("áčďéíľňôšťúýžÁČĎÉÍĽŇÔŠŤÚÝŽ")
 
 log = logging.getLogger("SESSION")
 
@@ -134,6 +140,51 @@ _SLAVIC_TO_SK = {"sk", "sl", "hr", "sr", "bs"}
 
 
 class Session:
+    async def _record_utterance_session(self, state_data: dict) -> None:
+        index = state_data.get("index", 1)
+        log.info("[%s] ENTERING RAW RECORDING MODE for utterance %d", self.session_id, index)
+        self.state = SessionState.INIT
+        try:
+            await self._handle_session_start()
+            
+            # 1. Play Start Beep down to the device
+            def make_beep(freq, duration_s):
+                num = int(16000 * duration_s)
+                smp = [int(12000 * math.sin(2 * math.pi * freq * (i / 16000))) for i in range(num)]
+                return struct.pack(f"<{num}h", *smp)
+                
+            await send_frame(self.writer, FRAME_PCM_DOWN, make_beep(750, 0.25))
+            await send_frame(self.writer, FRAME_PCM_DOWN_END)
+            
+            # 2. Receive Audio Stream
+            await self._receive_audio()
+            
+            # 3. Save WAV File
+            os.makedirs("/home/foscam/herVoice/dataset/raw", exist_ok=True)
+            wav_path = f"/home/foscam/herVoice/dataset/raw/charlie_real_{index:03d}.wav"
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(bytes(self.audio_buf))
+                
+            log.info("[%s] Saved raw utterance to %s", self.session_id, wav_path)
+            
+            # 4. Play End Beep down to the device (double beep)
+            end_beep = make_beep(600, 0.1) + b"\x00" * 800 + make_beep(600, 0.1)
+            await send_frame(self.writer, FRAME_PCM_DOWN, end_beep)
+            await send_frame(self.writer, FRAME_PCM_DOWN_END)
+            
+            # 5. Signal Success to the CLI
+            with open("/tmp/hervoice_record_state.json", "w") as f:
+                json.dump({"active": False, "index": index, "status": "success"}, f)
+                
+        except Exception as e:
+            log.exception("[%s] Error in raw recording session: %s", self.session_id, e)
+            with open("/tmp/hervoice_record_state.json", "w") as f:
+                json.dump({"active": False, "index": index, "status": "failed"}, f)
+            raise
+
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                  stt, llm, tts, conversation_history: Optional[list] = None,
                  first_frame: Optional[tuple] = None,
@@ -158,6 +209,7 @@ class Session:
         # Conversation language inherited by follow-up turns on the same
         # connection (set by handle_client from the previous session).
         self.sticky_lang    = sticky_lang
+        self.reply_lang     = None   # follows the reply text (set in _run_llm_tts)
         self.lang_confirmed = False  # True once STT produced a transcript
         # Latency measurement: stage marks in seconds relative to _t0
         # (session start). See _log_latency() for the line format.
@@ -183,15 +235,31 @@ class Session:
         def dur(a: str, b: str) -> float:
             return m[b] - m[a] if a in m and b in m else -1.0
 
+        think = (m['llm_first'] - m['stt']) if 'llm_first' in m and 'stt' in m else -1.0
+        reasoning = getattr(self.llm, 'last_reasoning_chars', -1)
+        reasoning_s = '  - ' if reasoning is None or reasoning < 0 else str(reasoning)
         line = (f"audio={f(m.get('audio', -1))} stt={f(dur('audio', 'stt'))} "
+                f"think={f(think)} reasoning={reasoning_s} "
                 f"llm_first={f(m.get('llm_first', -1))} "
                 f"llm={f(dur('stt', 'llm'))} "
                 f"FAT={f(m.get('tts_first', -1))} "
-                f"tail={f(dur('llm', 'done'))} lang={self.lang}")
+                f"tail={f(dur('llm', 'done'))} "
+                f"e2e={f(m.get('done', -1))} lang={self.lang}")
         log.info("[%s] LATENCY %s%s", self.session_id, line,
                  f"  ({note})" if note else "")
 
     async def run(self) -> None:
+        # Check for dataset recording state intercept
+        try:
+            if os.path.exists("/tmp/hervoice_record_state.json"):
+                with open("/tmp/hervoice_record_state.json", "r") as f:
+                    rec_state = json.load(f)
+                if rec_state.get("active", False):
+                    await self._record_utterance_session(rec_state)
+                    return
+        except Exception as exc:
+            log.warning("Recording intercept failed, falling back to standard run: %s", exc)
+            
         t_start = time.perf_counter()
         self._t0 = t_start
         log.info("[%s] Session started", self.session_id)
@@ -206,16 +274,14 @@ class Session:
                      self.session_id, t_audio_done - t_start, len(self.audio_buf))
 
             transcript, raw_lang = await self._run_stt()
-            # Language policy: TTS voices exist for EN and SK only, and
-            # Whisper confuses Slavic languages (Slovenian/Croatian/Serbian
-            # often detected as hr/sr/sl). Normalize: all Slavic -> sk,
-            # everything else -> en. Follow-up turns inherit the
-            # conversation language (sticky_lang) - a one-word answer is
-            # the worst case for detection.
+            # Language policy (strict EN/SK): TTS voices exist for EN and SK
+            # only. If STT detection is not clearly English, it is Slovak -
+            # never any other language (Whisper confuses Slovak with pl/cs).
+            # Follow-up turns inherit the conversation language (sticky_lang).
             if self.sticky_lang:
                 self.lang = self.sticky_lang
             else:
-                self.lang = "sk" if raw_lang in _SLAVIC_TO_SK else "en"
+                self.lang = "en" if raw_lang == "en" else "sk"
             t_stt = time.perf_counter()
             self._mark("stt")
             log.info("[%s] STT done in %.2fs: lang=%s (raw=%s) %r",
@@ -237,7 +303,8 @@ class Session:
 
             self.state = SessionState.DONE
 
-        except asyncio.IncompleteReadError:
+        except (asyncio.IncompleteReadError, ConnectionResetError,
+                BrokenPipeError):
             # Client went away: propagate so handle_client() closes the loop
             self._log_latency("client disconnected")
             log.info("[%s] Client disconnected mid-session", self.session_id)
@@ -370,6 +437,7 @@ class Session:
         reply = strip_markdown(reply)
         if not reply:
             reply = "Sorry, I did not catch that."
+        self.reply_lang = "sk" if any(c in _SK_CHARS for c in reply) else self.lang
 
         # If nothing was streamed (empty/failed reply), speak the fallback
         # so the device never goes silent.
