@@ -470,7 +470,14 @@ static void lvgl_task(void *arg)
                     smoothed_level = smoothed_level * 0.80f + (float)raw_level * 0.20f;
                 }
                 
-                int size = 25 + (int)(smoothed_level / 110.0f);
+                int size;
+                if (s_current_state == UI_STATE_RECORDING) {
+                    /* Microphone RMS is typically 150-1500; multiply by 12x to scale
+                     * to the same visual range as the full-scale 32768 TTS peak. */
+                    size = 25 + (int)((smoothed_level * 12.0f) / 110.0f);
+                } else {
+                    size = 25 + (int)(smoothed_level / 110.0f);
+                }
                 if (size > 220) size = 220;
                 
                 if (s_current_state == UI_STATE_RECORDING || s_current_state == UI_STATE_PLAYING) {
