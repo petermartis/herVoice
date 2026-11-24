@@ -41,9 +41,10 @@ class LlamaLLM:
 
     def _get_session(self) -> "aiohttp.ClientSession":
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                headers={"Content-Type": "application/json"}
-            )
+            headers = {"Content-Type": "application/json"}
+            if config.LLM_API_KEY:
+                headers["Authorization"] = f"Bearer {config.LLM_API_KEY}"
+            self._session = aiohttp.ClientSession(headers=headers)
         return self._session
 
     async def complete(self, history: list[dict], lang: str = "sk",

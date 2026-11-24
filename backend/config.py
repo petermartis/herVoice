@@ -10,8 +10,9 @@ PORT = int(os.getenv("HERVOICE_PORT", "8765"))
 WHISPER_SERVER_URL = os.getenv("WHISPER_SERVER_URL", "http://127.0.0.1:15556")
 
 # ── LLM — llama-server (Qwen3.5-27B, OpenAI-compat) ───────────────────────
-LLM_SERVER_URL    = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8080")
-LLM_MODEL         = os.getenv("LLM_MODEL", "qwen3.8")
+LLM_SERVER_URL    = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8081")
+LLM_MODEL         = os.getenv("LLM_MODEL", "qwen3.8-flash-next-unsloth-ud-iq4_xs-v31")
+LLM_API_KEY       = os.getenv("LLM_API_KEY", "")
 LLM_NO_THINK      = os.getenv("LLM_NO_THINK", "1") == "1"  # Qwen3 /no_think tag for low voice latency
 LLM_MAX_TOKENS    = int(os.getenv("LLM_MAX_TOKENS", "256"))
 LLM_TEMPERATURE   = float(os.getenv("LLM_TEMPERATURE", "0.7"))
