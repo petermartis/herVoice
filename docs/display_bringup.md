@@ -1,216 +1,181 @@
-# herVoice Display Bringup — ST77916 QSPI 360×360
+# ST77916 display implementation
 
-## Board & Display
+This document describes the **current deployed display path** for the Waveshare ESP32-S3-Touch-LCD-1.85C V2. Earlier bring-up experiments used different clock rates and register values; those are historical and must not override the current source.
 
-- **MCU board**: Waveshare ESP32-S3-Touch-LCD-1.85C **V2**
-- **Display**: ST77916 controller, round IPS 360×360, QSPI interface
-- **ESP-IDF**: 5.3.2, ESP32-S3
+Authoritative implementation: `firmware/components/ui/ui.c`.
 
----
+## Hardware
 
-## Wiring (confirmed from Waveshare schematic)
+| Item | Value |
+|---|---|
+| Board | Waveshare ESP32-S3-Touch-LCD-1.85C V2 |
+| Panel | ST77916, round 360×360 IPS |
+| Interface | QSPI |
+| UI framework | LVGL 8.3-era managed dependency |
+| Pixel format | RGB565 with configured byte ordering |
 
-| Signal  | GPIO | Notes |
-|---------|------|-------|
-| DATA0   | 46   | QSPI IO0 (MOSI) |
-| DATA1   | 45   | QSPI IO1 |
-| DATA2   | 42   | QSPI IO2 |
-| DATA3   | 41   | QSPI IO3 |
-| CLK     | 40   | QSPI clock |
-| CS      | 21   | Chip select |
-| TE      | 18   | Tearing effect (input) |
-| BL      | 5    | Backlight PWM (LEDC) |
-| RST     | —    | Via TCA9554PWR I2C expander: I2C bus GPIO10/11, addr 0x20, EXIO2 = P1 (bit 0x02) |
+### Pin map
 
----
+| Signal | GPIO | Notes |
+|---|---:|---|
+| QSPI D0 | 46 | data lane 0 |
+| QSPI D1 | 45 | data lane 1 |
+| QSPI D2 | 42 | data lane 2 |
+| QSPI D3 | 41 | data lane 3 |
+| QSPI clock | 40 | 80 MHz current configuration |
+| Chip select | 21 | direct GPIO |
+| Tearing effect | 18 | panel TE input path |
+| Backlight | 5 | direct PWM/LEDC control |
+| Panel reset | TCA9554 EXIO2 | expander address `0x20` on GPIO10/11 I2C bus |
 
-## Driver Stack
+Backlight and chip select are not routed through TCA9554 in the current hardware path. TCA9554 EXIO1 is reserved for CST816S touch reset; all expander writes must preserve both reset bits.
 
-- **Managed component**: `espressif/esp_lcd_st77916` v1.0.1
-- **LVGL**: `lvgl/lvgl` (version in `idf_component.yml`)
-- **sdkconfig**: `CONFIG_LV_COLOR_16_SWAP=y` — LVGL pre-swaps RGB565 bytes before writing to draw buffer
+## Current stable transfer configuration
 
-### QSPI opcodes (used by the driver)
+The stable deployed combination is:
 
-| Operation | Opcode |
-|-----------|--------|
-| Write command | 0x02 |
-| Write color data | 0x32 |
-| Command frame width | 32 bits |
+- QSPI pixel clock: **80 MHz**
+- transfer queue depth: **1**
+- `lv_disp_flush_ready()` called synchronously after the panel draw operation completes
+- two LVGL draw buffers, each 6480 RGB565 pixels
+- draw buffers allocated with `MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL`
+- no PSRAM-backed LCD DMA buffers
+- visualizer size updates paced to 20 FPS and skipped when unchanged
 
----
+The older statement that 40 MHz was the stable clock is obsolete. It avoided crashes during one bring-up stage but produced a rough/grainy image on the current panel. Eighty megahertz gives the clean display used by the production firmware.
 
-## Key Decisions Made (and Why)
+A queue depth greater than one combined with premature flush-ready signaling can race DMA and produce stripes. Calling LVGL flush-ready from an unsafe callback/ISR path has also caused memory faults. Preserve the current synchronous design unless a replacement is tested with audio playback under load.
 
-### 1. V2 chip variant unlock key: `F0 = 0x28`
+## Driver and command protocol
 
-The managed component's built-in default sequence uses `F0 = 0x08` (a different chip variant). That sequence only drives the middle third of the V2 display. The Waveshare V2 reference uses `F0 = 0x28` plus registers `7C=D1`, `83=E0`, `84=61` on the 0x28 page. These are the first 6 commands in `s_vendor_init`.
+The project requests the managed `espressif/esp_lcd_st77916` component in `firmware/main/idf_component.yml`. There is no tracked vendored v2 driver directory in the current repository.
 
-### 2. Full GOA block (0x60–0xD9) is required
+QSPI command framing uses the driver's ST77916 command path. The panel-specific behavior comes from the full `s_vendor_init` table in `ui.c`, not the managed component's shorter default table.
 
-Without the GOA (Gate Output Array) signal mapping block in Page 0x10, the gate driver cannot address all rows. Adding the full Waveshare GOA block makes the whole circle responsive.
+## Panel initialization sequence
 
-### 3. VCOM registers DD/DE must NOT be set
+The current source uses the complete approximately 188-command Waveshare/teason2021-derived table. It includes:
 
-Adding `DD=0x35, DE=0x35` (present in the component's default sequence) overrides the factory OTP VCOM with the wrong value for V2, causing pixel charge decay (visible as fading within 3 seconds). The Waveshare V2 reference deliberately leaves these out. Factory OTP VCOM is correct for this panel.
+- page/unlock setup
+- power and timing configuration
+- full GOA mapping blocks
+- positive and negative gamma tables
+- panel inversion command `INVON` (`0x21`)
+- `SLPOUT` (`0x11`) followed by a 120 ms delay
+- `DISPON` (`0x29`) followed by a 20 ms delay
 
-### 4. The 0x4C GRAM init command is destructive for V2
+Current source-specific values include:
 
-The component default includes a `4C=01` command (GRAM initialization at a special row address). On V2 this causes immediate display corruption (dotted line artifacts). Do not add it back.
+- `DD=0x4F`, `DE=0x4F`
+- charge-pump values `C8=0x01`, `CB=0x01`
+- page-0x10 `E0=0x07`
+- `INVON 0x21` present
 
-### 5. INVON (0x21) must NOT be sent
+Do not replace these with values from the previous experimental document (`no DD/DE`, `C8/CB=0x51`, `E0=0x0A`, or “never INVON”). Those claims described intermediate experiments and contradict the deployed table.
 
-This was the root cause of all the "wrong colours" / "pink/purple instead of dark green" symptoms.
+For maintenance, compare the complete byte table in source. A summarized hand-copied register list is not sufficiently authoritative for the GOA groups.
 
-**Panel polarity**: The display is **normally-black** (NB). Without any field applied (0x0000 in GRAM), the LC blocks light → BLACK. With full field (0xFFFF), light passes through → WHITE. This is standard NB-IPS behavior.
+## Initialization flow
 
-**Effect of INVON on NB panel**: INVON inverts all GRAM bits before the LC driver sees them. So:
-- Writing 0xFFFF → INVON → 0x0000 → no field → BLACK  
-- Writing 0x0280 (dark green) → INVON → 0xFD7F → near-full field → **bright pink/white** ✗
+At a high level, `ui_init()`:
 
-Without INVON:
-- 0xFFFF → full field → WHITE ✓  
-- 0x0280 → correct partial field → **dark green** ✓
-- All LVGL colors display correctly
+1. initializes the shared I2C/expander state needed for reset control
+2. resets and initializes the ST77916 panel
+3. applies the complete vendor command table
+4. enables and configures the backlight
+5. performs current diagnostic full-screen fills
+6. creates DMA-capable LVGL draw buffers
+7. registers the display flush path
+8. constructs state labels and the centered level halo
+9. starts the LVGL/UI task
 
-The Waveshare demo code includes INVON; it may have been tested with a different LVGL colour mapping or a different panel batch. For V2 with standard LVGL color conventions, INVON breaks colour rendering. **Do not add it back.**
+The UI is initialized before WakeNet and audio in `main.c`. This gives immediate visual boot feedback and ensures panel reset activity completes before touch starts using the shared expander.
 
-### 6. No `swap_xy`, no `mirror`, no `set_gap`
+## Diagnostic fills still present
 
-The Waveshare reference and testing confirm: no axis swap, no mirror, no GRAM offset needed. CASET 0–359, RASET 0–359 maps to the full 360×360 visible area.
+The audited `ui.c` still performs temporary full-screen `0x0000` and `0xFFFF` diagnostic fills with approximately two-second holds and emits initial display debug output before LVGL starts.
 
-### 7. QSPI clock: 40 MHz
+These diagnostics are no longer needed to prove basic panel operation and delay startup. Remove them in a dedicated change after verifying that no remaining timing dependency relies on the delay. Test cold boots, warm resets, audio startup, and touch after removal.
 
-80 MHz caused issues in a prior session (exact failure mode undocumented). 40 MHz is stable.
+## LVGL state machine
 
-### 8. DMA buffers must be internal DRAM
+| State | Label | Background |
+|---|---|---|
+| `UI_STATE_IDLE` | Ready | dark green `(0,80,0)` |
+| `UI_STATE_WAKE` | Ready | dark green `(0,80,0)` |
+| `UI_STATE_RECORDING` | Listening... | dark red `(160,0,0)` |
+| `UI_STATE_SENDING` | Processing... | blue `(0,0,140)` |
+| `UI_STATE_PLAYING` | Speaking... | teal `(0,120,120)` |
+| `UI_STATE_ERROR` | Error | bright red `(200,0,0)` |
 
-`MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL` is required. PSRAM (SPIRAM) buffers are not SPI-DMA safe with IDF 5.3. LVGL buffer size: 6480 pixels (360×360 / 20), two buffers for double-buffering.
+There is intentionally no yellow Wake screen. The wake/connect transition reuses Ready to avoid a distracting flash.
 
-### 9. C8 and CB charge pump: 0x51
+During a wake-free follow-up, the display can show Ready while the device waits for speech onset; it changes to Listening only after VAD detects speech. Ready therefore means either normal idle or an armed pre-speech follow-up window.
 
-Changed from Waveshare reference value (0x01) to match the component default (0x51) after the middle-section banding investigation. No visible regression.
+## Audio level halo
 
-### 10. GOA timing E0: 0x0A
+Recording and playback states show a centered translucent halo behind the label:
 
-Changed from 0x08 (Waveshare reference) to 0x0A (component default). No visible regression.
+- recording: pink/red, driven by microphone raw RMS with recording-specific scale compensation
+- playback: ice blue, driven by speaker sample peaks
+- fast attack and slower decay smooth the visible response
+- size updates are limited to one every 50 ms
+- the object size is changed only when the computed size differs
 
----
+The 20 FPS cap is a functional audio invariant. Unpaced display updates contend with QSPI, PSRAM, and audio traffic and have produced choppy streamed TTS.
 
-## Current State (as of last commit)
+## Full-screen GIF warning
 
-### What works
-- Full 360×360 circle responds to GRAM writes (confirmed by diagnostic fills)
-- LVGL renders and flushes correctly — confirmed by serial log showing flush callbacks with correct pixel values:
-  - White background: `px[0..3]=ffff ffff ffff ffff`
-  - IDLE dark green: `px[0..3]=8002 8002 8002 8002` (0x0280 byte-swapped = correct dark green)
-- Audio subsystem working (ES7210 mic, ES8311 speaker, 440 Hz test tone plays at boot)
-- WiFi not yet configured (placeholder credentials)
+A 360×360 LVGL GIF decoder needs roughly 518 KB for canvas/frame state at RGB565. In the standard allocator path this can exceed internal DRAM and fail silently. Moving decoder storage to PSRAM solves allocation but does not solve bus/CPU pressure: even a hidden GIF can leave its decode timer active and disrupt audio.
 
-### Current diagnostic code in `ui.c` (to be removed once display confirmed good)
+The production UI does not depend on an animated GIF. Do not re-enable one without:
 
-After `disp_on_off`, before LVGL starts, there is a 2-pass fill:
-1. `0x0000` fill (2 s hold) — expected: **BLACK** on NB panel without INVON
-2. `0xFFFF` fill (2 s hold) — expected: **WHITE** on NB panel without INVON
-
-**This fill block needs to be removed** once the display visually confirms correct solid colours. Look for the comment `/* DBG: fill entire GRAM with 0x0000 */` in `ui_init()`.
-
----
-
-## Immediate Next Steps (pick up from here)
-
-### Step 1 — Confirm panel polarity (in progress)
-
-The diagnostic fill was just flashed. After a reset:
-- First 2 s: display should go solid **BLACK**
-- Next 2 s: display should go solid **WHITE**
-- Then LVGL renders: **dark green circle, "Listening..." in white**
-
-Take a photo/note of what each phase shows. Expected on NB panel without INVON:  
-`0x0000 → BLACK`, `0xFFFF → WHITE`
-
-If 0x0000 → WHITE and 0xFFFF → BLACK: the panel is NW (normally-white). In that case, add `INVON` back to the vendor init AND invert all LVGL state colours.
-
-### Step 2 — Remove diagnostic code
-
-Once polarity confirmed and LVGL shows dark green correctly:
-1. Remove the `/* DBG: fill entire GRAM ... */` block from `ui_init()` in `firmware/components/ui/ui.c`
-2. Remove all `ESP_LOGI(TAG, "DBG ...")` flush logging lines from `lcd_flush_cb()`
-3. Remove the `static int s_flush_n` counter
-
-### Step 3 — WiFi credentials
-
-In `sdkconfig` (or via `idf.py menuconfig`):
-```
-CONFIG_HERVOICE_WIFI_SSID="your_ssid"
-CONFIG_HERVOICE_WIFI_PASSWORD="your_password"
-```
-
-### Step 4 — Flash wake word model
-
-The `model` partition at `0x310000` (3 MB) needs the wake-word binary:
-```
-idf.py -p PORT flash  # already done as part of normal flash
-```
-The `srmodels.bin` is included in the build output and flashed automatically. However the serial log shows:
-```
-Please check if there are target files in /srmodel/wn9_sophia_tts/wn9_index
-```
-This may require placing model files in the correct SPIFFS path or verifying the partition layout.
-
-### Step 5 — State machine integration
-
-The `ui_set_state(ui_state_t state)` API is ready. Hook it up to the voice pipeline state machine:
-- `UI_STATE_IDLE` — dark green, "Listening..."
-- `UI_STATE_WAKE` — amber, "Wake!"
-- `UI_STATE_RECORDING` — dark red, "Recording..."
-- `UI_STATE_SENDING` — blue, "Processing..."
-- `UI_STATE_PLAYING` — teal, "Speaking..."
-- `UI_STATE_ERROR` — bright red, "Error"
-
----
-
-## Init Sequence Reference (`s_vendor_init` in `ui.c`)
-
-```
-Page 0x28 unlock:
-  F0=28, F2=28, 7C=D1, 83=E0, 84=61, F2=82
-
-Page 0x01 (power/timing):
-  F0=00, F0=01, F1=01
-  B0=49, B1=4A, B2=1F, B4=46, B5=34, B6=D5, B7=30
-  B8=04, BA=00, BB=08, BC=08, BD=00
-  C0=80, C1=10, C2=37, C3=80, C4=10, C5=37
-  C6=A9, C7=41, C8=51, C9=A9, CA=41, CB=51
-  D0=91, D1=68, D2=68, F5={00,A5}
-  [NO DD/DE — factory VCOM OTP]
-  F1=10
-
-Page 0x02 (gamma):
-  F0=00, F0=02
-  E0={70,09,12,0C,0B,27,38,54,4E,19,15,15,2C,2F}
-  E1={70,08,11,0C,0B,27,38,43,4C,18,14,14,2B,2D}
-
-Page 0x10 (GOA timing + signal mapping):
-  F0=10, F3=10
-  E0=0A, E1=00, E2=0B, E3=00, E4=E0, E5=06, E6=21, E7=00
-  E8=05, E9=82, EA=DF, EB=89, EC=20, ED=14, EE=FF, EF=00
-  F8=FF, F9=00, FA=00, FB=30, FC=00, FD=00, FE=00, FF=00
-  GOA signal groups 0x60-0xD9 (full block, see source)
-  F3=01, F0=00
-
-[NO INVON — NB panel, INVON would invert all colours]
-11=00 (SLPOUT, 120 ms delay)
-```
-
----
-
-## File Map
-
-| File | Purpose |
-|------|---------|
-| `firmware/components/ui/ui.c` | All display + LVGL init and state rendering |
-| `firmware/components/ui/ui.h` | Public API: `ui_init()`, `ui_set_state()`, `ui_get_state()` |
-| `firmware/managed_components/espressif__esp_lcd_st77916/` | ST77916 QSPI panel driver (managed component, do not edit) |
-| `firmware/sdkconfig` | Build config — `LV_COLOR_16_SWAP=y` at line ~2208 |
-| `docs/display_bringup.md` | This file |
+1. explicit PSRAM allocation and matching free path
+2. explicit timer pause/delete when hidden
+3. audio-underrun testing during streamed TTS
+4. cold-boot memory-headroom testing with Wi-Fi and WakeNet active
+
+## Touch interaction with the display
+
+The CST816S uses direct interrupt GPIO4 and reset through TCA9554 EXIO1. Display reset uses EXIO2. A whole-register expander write that sets only EXIO2 can hold touch in reset indefinitely; preserve the other bit on every write.
+
+The touch task can temporarily show volume feedback. The normal voice state remains owned by the network/session flow.
+
+After an esptool hard reset, touch may remain inactive until a true USB power cycle. Do not diagnose display/touch integration solely from the first post-flash reset.
+
+## Debugging matrix
+
+| Symptom | First checks |
+|---|---|
+| Black screen with no LVGL | panel reset, complete vendor table, draw-buffer allocation, backlight GPIO5 |
+| Grainy/rough background | confirm QSPI is 80 MHz, not 40 MHz |
+| Vertical stripes | queue depth, flush-ready timing, concurrent transfers |
+| Wrong colors | byte-swap setting and exact current `INVON`/vendor table; do not apply old experimental advice |
+| Panel works but TTS becomes choppy | halo pacing, GIF/decode timers, excessive redraws, PSRAM contention |
+| Display works but touch is dead | true power cycle, EXIO1 preservation, register `0xFE=10`, GPIO4 interrupt/polling |
+| Reset during display init | internal DMA memory headroom and callback context |
+
+## Verification after display changes
+
+A display change is accepted only after:
+
+1. four consecutive cold or reset boots without panic
+2. uniform Ready background with no grain, stripes, or corruption
+3. correct state colors and centered labels
+4. responsive tap and swipe gestures after a real power cycle
+5. smooth recording/playback halo
+6. uninterrupted TTS streaming during continuous UI animation
+7. Wi-Fi and WakeNet still initialize with sufficient internal memory
+
+## Source map
+
+| File | Responsibility |
+|---|---|
+| `firmware/components/ui/ui.c` | panel bus/init table, LVGL, states, halo, backlight |
+| `firmware/components/ui/include/ui.h` | UI API and state enumeration |
+| `firmware/components/touch/touch.c` | CST816S, gestures, shared expander reset behavior |
+| `firmware/main/main.c` | subsystem initialization order |
+| `firmware/main/idf_component.yml` | managed display/LVGL dependencies |
+| `firmware/sdkconfig.defaults` | durable memory/PSRAM/system settings |
+
+When changing the panel table, update this document in the same commit and quote values from the current source, not from an earlier bring-up log.

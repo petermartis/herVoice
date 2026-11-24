@@ -1,332 +1,183 @@
 # herVoice
 
-## Overview
+herVoice is the embedded voice endpoint for **Charlie**, the family-aware Hermes assistant. A Waveshare ESP32-S3 device performs wake-word detection, endpointing, touch handling, UI, audio capture, and playback. A Linux backend performs speech recognition, routes the turn through the Hermes agent, synthesizes speech, and streams audio back to the device.
 
-herVoice is an ESP32-S3 based voice assistant in the style of Alexa. Wake word detection, voice activity detection (VAD), and a touch-screen UI all run on-device. When a wake word is detected, audio is streamed over TCP to a backend server that runs a full AI pipeline: Whisper for speech-to-text, Qwen 3.5 (via OpenClaw) for language model inference, and Piper for text-to-speech. The synthesised response audio is streamed back to the device and played through the built-in speaker.
+The production system supports **English and Slovak only**. The language chosen by the first recognized utterance remains fixed for follow-up turns on the same voice conversation.
 
----
+## Current production system
 
-## Architecture
+| Layer | Current implementation |
+|---|---|
+| Endpoint | Waveshare ESP32-S3-Touch-LCD-1.85C V2 |
+| Wake word | ESP-SR WakeNet `wn9_sophia_tts`; tap is the manual trigger |
+| Endpointing | Raw-RMS VAD in firmware, before 10× STT upload gain |
+| Device transport | Framed TCP PCM, device → backend `192.168.1.35:8765` |
+| Speech recognition | faster-whisper `large-v3-turbo`, CPU int8, service on `127.0.0.1:15556` |
+| Agent | Hermes gateway on `192.168.1.100:8642` |
+| Voice LLM route | Explicit local `qwen3.8-flash-next-unsloth-ud-iq4_xs-v31` through provider `custom` |
+| Direct LLM fallback | Local Strata OpenAI-compatible endpoint on `127.0.0.1:8081` |
+| English speech | Kokoro `af_heart`, 24 kHz, resampled for the device |
+| Slovak speech | ElevenLabs multilingual TTS; optional Piper startup path when ElevenLabs is not configured |
+| Conversation behavior | Per-device in-memory history, sentence-streamed TTS, wake-free follow-ups |
 
+The active firmware wake word is **Sophia**, not Charlie. A custom Charlie model remains future work.
+
+## System topology
+
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│ Waveshare ESP32-S3-Touch-LCD-1.85C V2                              │
+│ WakeNet · raw-RMS VAD · 16 kHz PCM · LVGL · CST816 touch           │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ framed TCP, port 8765
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ LLM host 192.168.1.35 — /home/foscam/herVoice                      │
+│                                                                      │
+│ hervoice-bridge       :8765   device protocol and session pipeline   │
+│ hervoice-stt        127.0.0.1:15556  faster-whisper                  │
+│ hervoice-tts        127.0.0.1:15555  Kokoro / ElevenLabs / Piper     │
+│ Strata Qwen         127.0.0.1:8081   direct local fallback           │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ OpenAI-compatible streaming API
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Hermes NAS 192.168.1.100:8642                                      │
+│ Charlie persona · memory · family context · skills · Homey/email     │
+│ Explicit provider=custom, model=Qwen 3.8 Flash                       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────┐     TCP     ┌────────────────────────────────┐
-│   Waveshare ESP32-S3-Touch-LCD-1.85C    │◄───────────►│  Backend Server (Linux/Mac)     │
-│   (V2 — ES7210 mic ADC, ES8311 DAC)     │             │                                │
-│                                         │  PCM audio  │  • Whisper STT (faster-whisper) │
-│  • WakeNet wake word (esp-sr)           │  streaming  │  • Qwen 3.5 LLM (via OpenClaw) │
-│  • Energy-based VAD                     │             │  • Piper TTS                   │
-│  • LVGL 1.85" QSPI touch display        │             │                                │
-│  • ES7210 4-ch mic ADC (I2C + I2S)      │             └────────────────────────────────┘
-│  • ES8311 speaker DAC (I2C + I2S)       │
-└─────────────────────────────────────────┘
-```
 
----
+See [docs/architecture.md](docs/architecture.md) for the complete runtime design and [docs/protocol.md](docs/protocol.md) for the wire format.
+
+## Voice-turn flow
+
+1. WakeNet detects Sophia, or the user taps the display.
+2. Firmware suspends WakeNet so it cannot consume samples from the same microphone ring during a session.
+3. Firmware opens a TCP connection to the bridge and sends `SESSION_START`.
+4. Raw-RMS VAD waits for speech, then sends amplified 16 kHz mono s16le audio in `PCM_UP` frames.
+5. After 600 ms of trailing silence, or at the 10-second cap, firmware sends `PCM_UP_END`.
+6. The bridge wraps audio as WAV and calls the STT service.
+7. The bridge normalizes the conversation language to English or Slovak and sends the turn to the Hermes gateway.
+8. Hermes runs Charlie with persona, memory, and allowed tools using local Qwen 3.8 Flash.
+9. The bridge parses Charlie's JSON reply, starts TTS as complete sentences become available, and streams `PCM_DOWN` frames.
+10. `REPLY_META` declares whether the assistant expects an answer; `PCM_DOWN_END` terminates playback.
+11. If a reply is expected, the device keeps the same socket and records the next turn without another wake word. Follow-ups are capped at five.
 
 ## Hardware
 
 ### Board
 
-**Waveshare ESP32-S3-Touch-LCD-1.85C — V2 revision**
+- Waveshare ESP32-S3-Touch-LCD-1.85C **V2**
+- ESP32-S3, 16 MB flash, 8 MB OCT/OPI PSRAM
+- 360×360 ST77916 QSPI round LCD
+- CST816S capacitive touch controller
+- ES7210 microphone ADC and ES8311 speaker DAC
+- TCA9554PWR GPIO expander
 
-> The V2 board uses codec ICs (ES7210 ADC + ES8311 DAC) for audio, not raw I2S microphones.
-> V1 boards used PCM5101A DAC + direct PDM/I2S MEMS mics — the firmware is **not** compatible with V1.
+The V1 board has a different audio design and is not supported by this firmware.
 
-- Product wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.85C
-- ESP32-S3 with 8 MB PSRAM, 16 MB Flash
-- 1.85" 360×360 ST77916 QSPI round LCD with CST816 capacitive touch
-- TCA9554 I2C GPIO expander (controls LCD backlight/reset)
-- 2× MEMS microphones → ES7210 4-channel ADC codec
-- ES8311 DAC codec → power amplifier
+### Authoritative pin map
 
-### GPIO Map
+| Function | Pin/address |
+|---|---|
+| I2C0 SDA / SCL | GPIO11 / GPIO10, 400 kHz |
+| ES7210 / ES8311 / TCA9554 / CST816S | `0x40` / `0x18` / `0x20` / `0x15` |
+| I2S MCLK / BCLK / WS | GPIO2 / GPIO48 / GPIO38 |
+| I2S microphone DIN / speaker DOUT | GPIO39 / GPIO47 |
+| Speaker amplifier enable | GPIO15 |
+| LCD CLK / D0 / D1 / D2 / D3 | GPIO40 / 46 / 45 / 42 / 41 |
+| LCD CS / TE / backlight | GPIO21 / GPIO18 / GPIO5 |
+| LCD reset | TCA9554 EXIO2 |
+| Touch interrupt / reset | GPIO4 / TCA9554 EXIO1 |
 
-#### I2C Bus (shared — SDA=GPIO11, SCL=GPIO10)
+Important hardware and initialization invariants are documented in [docs/development.md](docs/development.md) and [docs/display_bringup.md](docs/display_bringup.md).
 
-| Signal    | GPIO | Device(s)                                          |
-|-----------|------|----------------------------------------------------|
-| SDA       | 11   | ES7210 mic ADC, ES8311 DAC, TCA9554 LCD expander   |
-| SCL       | 10   | ES7210 mic ADC, ES8311 DAC, TCA9554 LCD expander   |
+## Repository layout
 
-I2C addresses: ES7210 = `0x40`, ES8311 = `0x18` (ES8311_ADDRRES_0), TCA9554 = `0x20`
-
-#### I2S Bus (full-duplex — one peripheral owns all clock lines)
-
-| Signal | GPIO | Direction | Connected to         |
-|--------|------|-----------|----------------------|
-| MCLK   | 2    | OUT       | ES7210 + ES8311      |
-| BCK    | 48   | OUT       | ES7210 + ES8311      |
-| WS     | 38   | OUT       | ES7210 + ES8311      |
-| DIN    | 39   | IN        | ES7210 (mic → ESP32) |
-| DOUT   | 47   | OUT       | ES8311 (ESP32 → spkr)|
-
-MCLK = 256 × sample_rate (4.096 MHz at 16 kHz). TX channel is enabled before RX so MCLK is stable when the ES7210 starts clocking.
-
-#### Audio Power Amplifier
-
-| Signal | GPIO | Notes                                              |
-|--------|------|----------------------------------------------------|
-| PA_EN  | 15   | Drive HIGH to unmute the amplifier; default LOW    |
-
-#### LCD / Display
-
-| Signal     | GPIO | Notes                         |
-|------------|------|-------------------------------|
-| QSPI CS    | TCA9554 | Via I2C expander           |
-| QSPI SCLK  | —    | ST77916 QSPI controller       |
-| QSPI D0–D3 | —    | ST77916 QSPI 4-bit data bus   |
-| Backlight  | TCA9554 | Via I2C expander           |
-
-#### Touch Controller
-
-| Signal | GPIO     | Notes                              |
-|--------|----------|------------------------------------|
-| INT    | via I2C  | CST816 on shared I2C bus           |
-| RST    | TCA9554  | Via I2C expander                   |
-
----
-
-## Repository Structure
-
-```
+```text
 herVoice/
-├── firmware/                           # ESP-IDF v5.3.2 project
-│   ├── main/
-│   │   ├── main.c                      # Startup — init order, task launch
-│   │   ├── idf_component.yml           # Managed component dependencies
-│   │   └── Kconfig.projbuild           # Wi-Fi, server, audio Kconfig options
-│   ├── components/
-│   │   ├── audio/                      # I2S + codec init, capture/playback tasks
-│   │   │   ├── audio_capture.c         # ES7210 init, full-duplex I2S, RMS logging
-│   │   │   ├── audio_playback.c        # ES8311 init, PA_EN, test tone, mono→stereo
-│   │   │   ├── ring_buffer.c           # Lock-free single-producer/consumer ring buf
-│   │   │   └── include/audio.h
-│   │   ├── esp_lcd_st77916/            # Vendored ST77916 driver v2.0.2 (see note below)
-│   │   ├── net/                        # Wi-Fi init, TCP stream task
-│   │   ├── touch/                      # CST816 capacitive touch driver
-│   │   ├── ui/                         # LVGL display, state machine
-│   │   └── wake/                       # WakeNet / esp-sr integration
-│   ├── .local_bin/
-│   │   └── python -> python3           # Symlink: workaround for esp-sr build script
-│   └── CMakeLists.txt
-├── backend/                            # Python asyncio TCP server
-│   ├── server.py                       # Main entry point
-│   ├── stt.py                          # Whisper STT (faster-whisper)
-│   ├── llm.py                          # OpenClaw / OpenAI-compatible LLM client
-│   ├── tts.py                          # Piper TTS subprocess wrapper
-│   ├── protocol.py                     # Frame encode/decode helpers
-│   └── requirements.txt
+├── firmware/                    ESP-IDF endpoint firmware
+│   ├── main/                    boot order and project configuration
+│   └── components/
+│       ├── audio/               codecs, I2S, capture/playback rings
+│       ├── net/                 Wi-Fi, VAD, framed TCP conversation loop
+│       ├── touch/               CST816S initialization and gestures
+│       ├── ui/                  ST77916/LVGL state UI and audio halo
+│       └── wake/                WakeNet integration
+├── backend/
+│   ├── server.py                asyncio TCP bridge and per-device history
+│   ├── session.py               STT → LLM → sentence TTS pipeline
+│   ├── protocol.py              frame encoding and decoding
+│   ├── stt.py                   STT HTTP client
+│   ├── llm.py                   Hermes streaming client + local fallback
+│   ├── tts.py                   TTS HTTP client and resampling
+│   ├── config.py                runtime configuration
+│   └── services/
+│       ├── stt_server.py        faster-whisper HTTP service
+│       └── tts_server.py        Kokoro / ElevenLabs / Piper HTTP service
+├── deploy/                      systemd unit templates
 ├── tools/
-│   └── mic_test/                       # Standalone ESP-IDF project — mic diagnostics
-│       └── main/main.c                 # I2S-only capture; prints RMS every 500 ms
+│   ├── e2e/test_client.py       manual protocol/latency client
+│   └── mic_test/                standalone microphone diagnostic firmware
 └── docs/
-    └── protocol.md                     # Binary framing protocol specification
+    ├── architecture.md          complete system and runtime overview
+    ├── development.md           build, deploy, verify, and known issues
+    ├── protocol.md              binary protocol specification
+    └── display_bringup.md       verified display implementation
 ```
 
----
+## Deployment locations
 
-## Audio Subsystem
+| Purpose | Location |
+|---|---|
+| Canonical development checkout | Mac mini: `/Users/pmartis/herVoice` |
+| GitHub | `github.com/petermartis/herVoice`, branch `main` |
+| NAS mirror | `/volume1/homes/hermes/herVoice` |
+| Deployed backend | LLM host: `/home/foscam/herVoice` |
+| Runtime secrets | `/home/foscam/herVoice/.env`, mode `0600`, never committed |
 
-### Codec Overview
+The Mac mini checkout is the canonical firmware build tree. Keep GitHub, the NAS mirror, and the deployed tracked files on the same commit. Runtime datasets, the virtual environment, `.env`, and local backups on the LLM host are intentionally untracked.
 
-| Codec  | Role       | I2C Addr | IDF Component           |
-|--------|------------|----------|-------------------------|
-| ES7210 | Mic ADC    | `0x40`   | `espressif/es7210 ^1.0` |
-| ES8311 | Speaker DAC| `0x18`   | `espressif/es8311 ^1.0` |
+## Build and operations
 
-### Initialisation Sequence (`audio_init`)
+The firmware currently targets ESP-IDF 5.3.x-era APIs. A release consists of five images:
 
-1. **Ring buffers** allocated (capture: 500 ms; playback: ~500 ms)
-2. **ES7210** configured over I2C — 16 kHz, MCLK ratio 256, I2S standard format, 16-bit, MIC_BIAS 2.87 V, gain 36 dB
-3. **Full-duplex I2S channel** created with `i2s_new_channel(&cfg, &tx, &rx)` so a single peripheral owns MCLK=GPIO2; no clock conflict
-4. Both TX and RX initialised in Philips/standard I2S mode, stereo, 16-bit
-5. **TX enabled first** so MCLK is running when ES7210 begins clocking data
-6. RX enabled; ES8311 configured over I2C (same MCLK source)
-7. **PA_EN** (GPIO15) driven HIGH to unmute the power amplifier
-8. **440 Hz boot beep** played as a speaker confidence check
+| Offset | Image |
+|---:|---|
+| `0x0` | `bootloader.bin` |
+| `0x8000` | `partition-table.bin` |
+| `0xD000` | `ota_data_initial.bin` |
+| `0x10000` | `hervoice.bin` |
+| `0x310000` | `srmodels.bin` |
 
-### Capture Task (`audio_capture.c`)
+Build, flash, service deployment, environment configuration, health checks, and acceptance gates are in [docs/development.md](docs/development.md).
 
-- Reads stereo frames from DMA (L = MIC1, R = MIC2)
-- Averages L+R → mono 16-bit PCM, writes to capture ring buffer
-- Logs RMS every second:
-  - `RMS = 0` → silent (check ES7210 wiring)
-  - `RMS < 50` → very quiet / background noise
-  - `RMS 50–500` → OK, ambient
-  - `RMS > 500` → loud / speech
+## Current status
 
-Typical ambient RMS with the board on a desk: **150–300**. Speech at normal distance: **500–1000+**.
+Implemented and deployed:
 
-### Playback Task (`audio_playback.c`)
+- Audio codec bring-up and full-duplex I2S channel ownership
+- WakeNet model loading and Sophia wake detection
+- Raw-domain VAD and utterance endpointing
+- Framed TCP upload and streamed playback
+- Stable ST77916 display and CST816S touch
+- Manual wake, local cancellation, volume gestures, and persistent volume
+- English/Slovak STT normalization and conversation language locking
+- Charlie persona through Hermes with local Qwen 3.8 Flash
+- Sentence-streamed TTS and follow-up turns without a second wake word
+- Kokoro English and ElevenLabs Slovak speech
+- Per-stage latency logging and manual E2E client
 
-- Reads mono PCM from playback ring buffer
-- Duplicates L=R → stereo before writing to I2S DMA
-- `audio_play_frames(buf, n)` — non-blocking write to ring buffer
-- `audio_play_test_tone(freq_hz, ms)` — synchronous sine tone (blocks until queued + drains)
-- `audio_playback_flush()` — blocks until ring buffer drains
+Outstanding work and known defects are tracked explicitly in [docs/development.md](docs/development.md#known-issues-and-development-priorities). Important current items include STT client/server contract verification, true mute enforcement, custom Charlie wake-word deployment, protocol hardening, automated language/follow-up tests, and removal of temporary display diagnostics.
 
----
+## Security
 
-## Build
-
-### Prerequisites
-
-- **ESP-IDF v5.3.2** installed at `~/esp/esp-idf`
-- Xtensa toolchain at `~/.espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/`
-- Python env at `~/.espressif/python_env/idf5.3_py3.14_env/`
-
-### Build Command
-
-The `esp-sr` component's `movemodel.py` script calls `python` (not `python3`). A symlink in `.local_bin/` fixes this; prepend it to PATH before building:
-
-```bash
-export IDF_PATH=~/esp/esp-idf
-export PATH="/path/to/firmware/.local_bin:$IDF_PATH/tools:$HOME/.espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/bin:$PATH"
-export PYTHON="$HOME/.espressif/python_env/idf5.3_py3.14_env/bin/python3"
-"$PYTHON" "$IDF_PATH/tools/idf.py" build
-```
-
-### Flash
-
-```bash
-"$PYTHON" "$IDF_PATH/tools/idf.py" -p /dev/cu.usbmodem31101 flash
-```
-
-### Monitor (USB Serial/JTAG quirk)
-
-Opening the serial port on an ESP32-S3 USB Serial/JTAG interface resets the chip into download mode (`boot:0x2`). Use this workflow:
-
-```bash
-# 1. Start monitor in the background via `script` to avoid immediate download-mode reset
-script -q /tmp/hvlog.txt "$PYTHON" "$IDF_PATH/tools/idf.py" -p /dev/cu.usbmodem31101 monitor
-
-# 2. Wait for "waiting for download" to appear, then press the physical RESET button on the board
-# 3. The device boots normally and log output flows
-# 4. Press Ctrl+] to exit; read the log at /tmp/hvlog.txt
-```
-
----
-
-## Configuration
-
-### Firmware Kconfig (`idf.py menuconfig` → "herVoice Configuration")
-
-| Symbol                          | Default      | Description                                   |
-|---------------------------------|--------------|-----------------------------------------------|
-| `CONFIG_HERVOICE_WIFI_SSID`     | `"MyNetwork"`| Wi-Fi SSID                                    |
-| `CONFIG_HERVOICE_WIFI_PASSWORD` | `""`         | Wi-Fi password                                |
-| `CONFIG_HERVOICE_SERVER_HOST`   | `""`         | Backend server IP or hostname                 |
-| `CONFIG_HERVOICE_SERVER_PORT`   | `9876`       | Backend server TCP port                       |
-| `CONFIG_HERVOICE_SAMPLE_RATE`   | `16000`      | Audio sample rate in Hz                       |
-| `CONFIG_HERVOICE_WAKE_WORD`     | —            | WakeNet model slot (e.g. `wn9_sophia_tts`)    |
-
-### Backend Environment Variables
-
-| Variable            | Default                     | Description                                        |
-|---------------------|-----------------------------|----------------------------------------------------|
-| `HERVOICE_HOST`     | `0.0.0.0`                   | Interface the TCP server binds to                  |
-| `HERVOICE_PORT`     | `9876`                      | TCP port                                           |
-| `WHISPER_MODEL`     | `base`                      | faster-whisper model size (tiny/base/small/medium) |
-| `WHISPER_DEVICE`    | `cpu`                       | Inference device (`cpu` or `cuda`)                 |
-| `OPENCLAW_BASE_URL` | `http://localhost:11434/v1` | OpenClaw / OpenAI-compatible API base URL          |
-| `OPENCLAW_MODEL`    | `qwen2.5:3b`                | LLM model name                                     |
-| `PIPER_BINARY`      | *(required)*                | Absolute path to the `piper` binary                |
-| `PIPER_MODEL`       | *(required)*                | Absolute path to the `.onnx` voice model           |
-
-### Backend Quick Start
-
-```bash
-cd backend
-pip install -r requirements.txt
-
-export PIPER_BINARY=/path/to/piper
-export PIPER_MODEL=/path/to/voice.onnx
-export OPENCLAW_BASE_URL=http://localhost:11434/v1
-export OPENCLAW_MODEL=qwen2.5:3b
-
-python server.py
-```
-
----
-
-## Protocol
-
-Device-to-server and server-to-device communication uses a custom binary framing protocol over a persistent TCP connection. Each frame has a 5-byte header (`uint32 LE` length + `uint8` type) followed by a variable-length payload.
-
-Full specification: [docs/protocol.md](docs/protocol.md)
-
----
-
-## Implementation Notes
-
-### Vendored `esp_lcd_st77916`
-
-The managed component `espressif/esp_lcd_st77916` has two incompatible codebases:
-- **v1.x** (from esp-bsp) — works with IDF 5.3; wrong init sequence for this board → blank screen
-- **v2.x** (from esp-iot-solution) — correct init sequence; requires IDF ≥ 5.4
-
-`firmware/components/esp_lcd_st77916/` vendors v2.0.2 from esp-iot-solution with two modifications:
-1. `include(package_manager)` / `cu_pkg_define_version()` removed from `CMakeLists.txt` (not available outside the component manager)
-2. Version macros (`ESP_LCD_ST77916_VER_*`) injected via `target_compile_definitions` instead
-
-`espressif/esp_lcd_st77916` is intentionally absent from `idf_component.yml` and `dependencies.lock`.
-
-### `esp-sr` Python Wrapper
-
-`esp-sr`'s `movemodel.py` calls `python` literally. On systems where only `python3` exists, the build fails. The fix is a symlink:
-
-```bash
-mkdir -p firmware/.local_bin
-ln -s $(which python3) firmware/.local_bin/python
-```
-
-Prepend `firmware/.local_bin` to `PATH` before every build (shown in the build command above).
-
-### Wake Word Model
-
-The `wn9_sophia_tts` model binary must be flashed to the `model` partition at offset `0x310000`. If the partition is empty, `wake_init()` logs a warning and skips detection — the rest of the firmware continues normally.
-
-```bash
-# Flash just the model partition after a full flash
-"$PYTHON" -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 \
-  write_flash 0x310000 build/srmodels/srmodels.bin
-```
-
----
-
-## Microphone Diagnostic Tool
-
-`tools/mic_test/` is a minimal standalone ESP-IDF project that initialises only the I2S microphone (no speaker, no codecs, no display) and prints audio statistics every 500 ms. Use it to confirm raw I2S data before bringing up the full firmware.
-
-```bash
-cd tools/mic_test
-"$PYTHON" "$IDF_PATH/tools/idf.py" build flash monitor
-```
-
-Expected output when working:
-```
-I (500) MIC_TEST: RMS=187  min=-1024  max=+1102  (512 frames)
-```
-
-Expected output when wiring is broken:
-```
-I (500) MIC_TEST: RMS=0  min=0  max=0  — ALL ZEROS (check wiring)
-```
-
----
-
-## Development Roadmap
-
-| Phase | Description                                                             | Status         |
-|-------|-------------------------------------------------------------------------|----------------|
-| 1     | Hardware bring-up — ES7210/ES8311 codecs, I2S, LVGL display, touch      | **Complete**   |
-| 2     | ESP-SR / WakeNet integration and wake word detection                    | In progress    |
-| 3     | Energy-based VAD and utterance segmentation                             | Planned        |
-| 4     | TCP streaming client and PCM playback of server response                | Planned        |
-| 5     | Full backend integration — Whisper → Qwen → Piper                       | Planned        |
-| 6     | UX hardening, threshold tuning, and reliability testing                 | Planned        |
-
----
+- Never commit Wi-Fi passwords, API keys, bearer tokens, cloned-voice identifiers tied to private accounts, or `.env` files.
+- Firmware Wi-Fi credentials belong only in gitignored `firmware/sdkconfig`.
+- Backend secrets belong only in `/home/foscam/herVoice/.env` with mode `0600`.
+- Logs and documentation must name environment variables, never their values.
+- The device protocol currently assumes a trusted network and has no transport encryption or authentication; do not expose port 8765 to an untrusted network.
 
 ## License
 

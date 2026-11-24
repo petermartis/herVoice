@@ -1,0 +1,334 @@
+# herVoice development and operations guide
+
+This guide covers repository ownership, firmware builds, backend deployment, runtime verification, debugging, and known development priorities.
+
+## Sources of truth
+
+| Item | Authoritative location |
+|---|---|
+| Canonical development repository | Mac mini `/Users/pmartis/herVoice` |
+| Shared remote | `github.com/petermartis/herVoice`, branch `main` |
+| NAS mirror | `/volume1/homes/hermes/herVoice` |
+| Running backend checkout | LLM host `/home/foscam/herVoice` |
+| Firmware behavior | Source under `firmware/`, especially `main.c` and component implementations |
+| Backend behavior | Source under `backend/` and installed systemd units |
+| Runtime secrets | LLM host `/home/foscam/herVoice/.env`, mode `0600` |
+
+The deployed checkout contains intentionally untracked runtime state such as `.env`, `venv/`, datasets, generated audio, and local backups. Synchronize tracked files by commit without deleting those assets.
+
+Before development, require all tracked copies to agree:
+
+```bash
+# Run in each checkout
+git fetch origin
+git rev-parse HEAD
+git rev-parse origin/main
+git status --porcelain=v1
+git rev-list --left-right --count HEAD...origin/main
+```
+
+A synchronized clean checkout reports identical commit IDs and `0 0`. The deployed checkout may list approved untracked runtime files but should have no modified tracked files.
+
+## Firmware build environment
+
+The canonical build and flash host is the Mac mini. The project uses ESP-IDF 5.3.x-era APIs and the installed Espressif environment on that machine.
+
+The esp-sr `movemodel.py` helper invokes `python` literally. `firmware/.local_bin/python` is a compatibility link to Python 3 and should be at the front of `PATH` when needed.
+
+Example:
+
+```bash
+cd /Users/pmartis/herVoice/firmware
+export IDF_PATH="$HOME/esp/esp-idf"
+export PATH="$PWD/.local_bin:$IDF_PATH/tools:$PATH"
+. "$IDF_PATH/export.sh"
+idf.py build
+```
+
+Do not treat command exit alone as a successful build. Require the explicit `Project build complete` line and all release artifacts.
+
+### Durable build invariants
+
+`firmware/sdkconfig.defaults` must retain:
+
+- ESP32-S3 target
+- 240 MHz CPU
+- 16 MB flash
+- OCT/OPI PSRAM mode at 80 MHz
+- 16 KB main-task stack
+- 1 kHz FreeRTOS tick
+- four static Wi-Fi RX buffers
+- custom partition table
+
+QUAD PSRAM is not valid for this V2 board. The generic boot phrase `Spiram mode: SPI` is not evidence that QUAD should be selected.
+
+### Firmware credentials
+
+Store Wi-Fi values only in gitignored `firmware/sdkconfig`:
+
+```text
+CONFIG_HERVOICE_WIFI_SSID="..."
+CONFIG_HERVOICE_WIFI_PASSWORD="..."
+```
+
+Never add those values to `sdkconfig.defaults`, documentation, shell history, or commits.
+
+## Release images and partition map
+
+| Partition | Offset | Size | Image |
+|---|---:|---:|---|
+| Bootloader | `0x0` | generated | `bootloader.bin` |
+| Partition table | `0x8000` | generated | `partition-table.bin` |
+| OTA metadata | `0xD000` | `0x2000` | `ota_data_initial.bin` |
+| Factory application | `0x10000` | `0x300000` | `hervoice.bin` |
+| Wake models, SPIFFS | `0x310000` | `0x500000` | `srmodels.bin` |
+| Storage, SPIFFS | `0x810000` | `0x7F0000` | runtime data |
+
+Before relaying or flashing a release, calculate and compare SHA-256 hashes for all five images at the source and destination.
+
+Example flash operation:
+
+```bash
+idf.py -p /dev/cu.usbmodem31101 flash
+```
+
+Every esptool image must report `Hash of data verified`.
+
+### ROM recovery and monitor behavior
+
+If normal flashing cannot connect:
+
+1. Hold **BOOT**.
+2. Tap **RST**.
+3. Release **BOOT**.
+4. Flash.
+5. If the serial output remains at `waiting for download`, tap **RST** once without BOOT.
+
+Opening the ESP32-S3 USB Serial/JTAG port can reset the device into download mode. Start the monitor, then press RST once to obtain a fresh application boot.
+
+After any esptool hard reset, physically power-cycle USB before testing touch; the CST816S may otherwise remain unresponsive.
+
+## Post-flash acceptance gate
+
+Do not accept a firmware build merely because it flashed. A clean boot must show:
+
+- PSRAM initialized in the expected OCT/OPI mode
+- preferred two-second playback ring allocated in PSRAM
+- WakeNet model list loaded and `wn9_sophia_tts` created
+- audio capture and playback initialized
+- boot tone audible
+- touch controller identified after a real power cycle
+- Wi-Fi `GOT_IP`
+- network, capture, WakeNet, touch, and UI tasks running
+- stable Ready state
+- no abort, reset loop, panic, watchdog, or repeated allocation failure
+
+Then test:
+
+1. Idle wake phrase activates exactly once.
+2. Tap activates manually.
+3. Normal speech transitions Ready → Listening → Processing → Speaking → Ready.
+4. English and Slovak replies use the correct language and voice.
+5. A Charlie question opens a wake-free follow-up turn.
+6. Tap during a session cancels within the receive-poll interval.
+7. Swipe volume survives reboot.
+8. TTS remains smooth while the 20 FPS halo is active.
+
+## Critical firmware invariants
+
+### Boot order
+
+Keep WakeNet model loading before I2S initialization:
+
+```text
+NVS → UI → esp_srmodel_init → wake_init → audio_init → test tone
+    → capture task → WakeNet task → touch → Wi-Fi → network task
+```
+
+Model creation after I2S DMA has caused intermittent model-parser corruption and `LoadProhibited` resets.
+
+### Shared microphone ring
+
+WakeNet and session upload read the same capture ring. Suspend wake detection before a voice session and resume it only after the TTS tail and a short delay. If both readers run concurrently, each receives fragments of the utterance.
+
+### VAD before gain
+
+Compute VAD RMS on raw samples. Apply the 10× gain only after speech starts and only for STT upload. Running VAD on amplified ambient noise prevents silence termination and forces every turn to the 10-second cap.
+
+### Display traffic versus audio
+
+Keep QSPI at 80 MHz, transfer queue depth at 1, synchronous flush-ready signaling, DMA-capable internal LVGL buffers, 20 FPS halo pacing, and dirty-checking. Aggressive redraws or hidden full-screen GIF decoding can starve PSRAM/audio traffic and produce choppy TTS.
+
+### Playback memory
+
+Allocate the large playback ring in PSRAM, then copy each chunk through internal RAM before I2S DMA. Capability flags are requirements, not alternatives: asking for both `MALLOC_CAP_SPIRAM` and `MALLOC_CAP_INTERNAL` does not mean “either.”
+
+### Wi-Fi
+
+Keep power saving disabled and reconnect forever. Do not delay inside an event callback; use a helper task. Do not restore large static RX-buffer counts without rechecking internal-RAM headroom.
+
+## Backend environment
+
+Create a virtual environment under the deployed checkout and install both bridge and service dependencies. Dependency files currently use minimum versions rather than a lockfile, so record resolved versions for reproducible releases.
+
+The root `.env` is loaded by the bridge unit and should be loaded by the installed TTS unit. It must remain `0600`, owned by the service account, and untracked.
+
+Representative names only—never place real values in documentation:
+
+```dotenv
+HERVOICE_HOST=0.0.0.0
+HERVOICE_PORT=8765
+WHISPER_SERVER_URL=http://127.0.0.1:15556
+PIPER_SERVER_URL=http://127.0.0.1:15555
+
+HERMES_API_ENABLED=1
+HERMES_API_URL=http://192.168.1.100:8642/v1/chat/completions
+HERMES_API_KEY=<protected>
+HERMES_LLM_PROVIDER=custom
+HERMES_LLM_MODEL=qwen3.8-flash-next-unsloth-ud-iq4_xs-v31
+HERMES_DISABLE_THINKING=1
+
+LLM_SERVER_URL=http://127.0.0.1:8081
+LLM_MODEL=qwen3.8-flash-next-unsloth-ud-iq4_xs-v31
+LLM_API_KEY=<protected>
+
+ELEVENLABS_API_KEY=<protected>
+ELEVENLABS_SK_VOICE_ID=<protected account voice id>
+ELEVENLABS_MODEL=eleven_multilingual_v2
+```
+
+The checked-in environment example is historical and must not be treated as authoritative until it is aligned with `backend/config.py` and the service implementations.
+
+## Systemd deployment
+
+The active deployment consists of:
+
+- `hervoice-stt.service`
+- `hervoice-tts.service`
+- `hervoice-bridge.service`
+
+The units execute `/home/foscam/herVoice/venv/bin/python` from `/home/foscam/herVoice`. The bridge starts after STT and TTS but does not currently declare hard `Requires=` dependencies.
+
+After installing or changing a unit:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart hervoice-stt hervoice-tts hervoice-bridge
+systemctl is-active hervoice-stt hervoice-tts hervoice-bridge
+systemctl cat hervoice-tts
+```
+
+Verify the installed unit, not just the repository template. In particular, confirm that TTS has an `EnvironmentFile` entry for the root `.env` before expecting ElevenLabs variables to exist.
+
+## Health and smoke checks
+
+### STT
+
+The intended STT service contract is:
+
+```text
+POST http://127.0.0.1:15556/transcribe?language=auto&sample_rate=16000
+Content-Type: application/octet-stream
+Body: complete WAV bytes or raw s16le PCM
+```
+
+`GET /health` returns a small status response. Requests under 1000 bytes are rejected.
+
+**Current defect:** `backend/stt.py` sends multipart form data while `stt_server.py` reads the complete body as audio and reads language from the query string. Align the two implementations and add an integration test before treating this contract as stable.
+
+### TTS
+
+```text
+POST http://127.0.0.1:15555/synthesize
+Content-Type: application/json
+{"text":"Hello","lang":"en"}
+```
+
+Validate the returned data as WAV, not only HTTP 200. Check channel count, sample width, sample rate, duration, peak/RMS, and that the waveform does not end at a clipped DC rail.
+
+ElevenLabs may return MP3 despite a PCM request. The service detects compressed audio and uses ffmpeg to decode it to 16 kHz mono s16le before wrapping WAV.
+
+### Local model
+
+Strata health is available on the local model service. The expected loaded model is `qwen3.8-flash-next-unsloth-ud-iq4_xs-v31`, with authentication enabled. Do not print the key while probing.
+
+### Bridge
+
+Confirm port 8765 is listening and the startup journal reports the Hermes agent API backend. A startup line naming direct local LLM means the Hermes key/configuration was unavailable.
+
+## Manual E2E client
+
+`tools/e2e/test_client.py` sends a 16-bit mono WAV or raw PCM to the bridge, measures first-audio and total latency, and saves the returned 16 kHz mono WAV.
+
+Use it to verify transport and audio production, but understand its limits:
+
+- no transcript assertion
+- no provider/model assertion
+- no language assertion
+- no response-content assertion
+- no WAV quality assertion
+- skips `REPLY_META`
+- cannot record a second follow-up turn on the same socket
+
+These limitations should be closed with automated integration tests.
+
+## Latency debugging
+
+Read bridge journal `LATENCY` lines. Diagnose the longest stage rather than retuning unrelated components:
+
+| Field/stage | Likely subsystem |
+|---|---|
+| audio upload | device VAD, trailing silence, network upload |
+| STT | faster-whisper service/model/CPU |
+| LLM first content | Hermes gateway, model queue, tool loop, prompt size |
+| LLM total | response length and model generation |
+| TTS first audio | sentence boundary and selected TTS engine |
+| tail | playback ring and DMA drain |
+| first-audio time | end-to-end user-perceived latency |
+
+The Speaking UI state is entered only when the first `PCM_DOWN` arrives; a visual state alone is not proof that useful audio was queued or played.
+
+## Dataset collection
+
+Production-microphone collection mode is driven by `/tmp/hervoice_record_state.json`. Active mode bypasses STT/LLM/TTS, plays cue tones, and writes WAV files to `dataset/raw/`. Treat voice samples as private data and keep them untracked unless the user explicitly approves publication.
+
+## Known issues and development priorities
+
+### Correctness and reliability
+
+1. **Align STT client/server HTTP contracts.** Replace multipart or change the service consistently; cover WAV and raw PCM.
+2. **Load TTS secrets in the checked-in unit.** Add and verify `EnvironmentFile=-/home/foscam/herVoice/.env`.
+3. **Implement a real Slovak TTS failure fallback** or explicitly document speech loss when ElevenLabs is unavailable.
+4. **Harden frame validation.** Bound payload lengths; validate protocol version, exact session payload length, declared format, and even PCM byte counts; always consume or reject surplus bytes safely.
+5. **Make mute functional.** Apply the touch mute state to playback/amplifier behavior and define whether capture continues.
+6. **Persist or deliberately reset conversation state.** Current bridge history is lost on restart and language is connection-scoped.
+
+### Testing
+
+1. Add STT contract integration tests.
+2. Add English/Slovak normalization and language-lock tests.
+3. Assert voice requests use `provider=custom` and Qwen 3.8 Flash.
+4. Exercise `REPLY_META`, a second turn on the same socket, silence timeout, and five-turn cap.
+5. Validate generated WAV format and signal sanity.
+6. Add cancellation and truncated/disconnected-socket tests.
+7. Pin Python dependencies or generate a reproducible lock/constraints file.
+
+### Product work
+
+1. Train and deploy a custom **Charlie** wake-word model; keep Sophia and tap as evaluation controls.
+2. Retain disputed-turn audio with bounded, privacy-aware retention to diagnose Whisper hallucinations.
+3. Remove temporary full-screen display diagnostics and debug logs after confirming no remaining dependency on them.
+4. Improve Slovak follow-up detection for statement-form questions without punctuation.
+5. Instrument firmware-side wake, VAD-start, VAD-end, connect, and upload timestamps.
+6. Implement VAD-driven barge-in and then full-duplex capture using the V2 hardware's AEC path.
+
+## Documentation maintenance rule
+
+When behavior changes, update documentation in the same commit:
+
+- topology or model routing → `README.md` and `docs/architecture.md`
+- frame or session behavior → `docs/protocol.md`
+- display pins/init/timing → `docs/display_bringup.md`
+- build, deploy, tests, or known defects → this file
+
+Do not leave historical experiments phrased as current invariants. When preserving a failed approach is useful, label it clearly as historical and state the current source-of-truth implementation.

@@ -1,105 +1,199 @@
-# herVoice Binary Protocol Specification
+# herVoice binary protocol
 
-## Overview
+## Scope
 
-herVoice uses a lightweight binary framing protocol over a persistent TCP connection between the ESP32-S3 device and the backend server. Each message is a self-delimited frame consisting of a fixed 5-byte header followed by a variable-length payload. The protocol is designed for low-overhead, real-time audio streaming in both directions and carries session control, raw PCM audio, and error signalling.
+herVoice uses a small framed protocol over TCP between the ESP32-S3 endpoint and `hervoice-bridge`. One TCP connection represents one wake-word conversation. The connection can carry multiple turns when Charlie requests a follow-up, but it closes when the conversation ends or is cancelled; it is not a permanently connected device channel.
 
----
+The protocol assumes a trusted home network. It provides no encryption, endpoint authentication, replay protection, or integrity layer beyond TCP.
 
-## Frame Structure
+## Framing
 
-Every frame on the wire has the following layout:
+Every frame consists of a five-byte header followed by the declared payload:
 
-| Field       | Size    | Type                    | Description                          |
-|-------------|---------|-------------------------|--------------------------------------|
-| `length_le` | 4 bytes | uint32, little-endian   | Length of the payload in bytes       |
-| `type`      | 1 byte  | uint8                   | Frame type identifier (see below)    |
-| `payload`   | N bytes | type-dependent          | Frame payload; N = `length_le`       |
+| Offset | Size | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 4 | payload length | unsigned 32-bit little-endian |
+| 4 | 1 | frame type | unsigned byte |
+| 5 | N | payload | frame-specific bytes |
 
-The header is always exactly 5 bytes. A `length_le` value of `0` is valid and indicates a frame with no payload (used for End frames).
+Zero-length payloads are valid. Implementations must read exactly five header bytes and then exactly the declared payload length.
 
----
-
-## Frame Types
-
-| Value  | Name            | Direction          | Description                                        |
-|--------|-----------------|--------------------|----------------------------------------------------|
-| `0x00` | Session Start   | Device → Server    | Opens a new voice session and negotiates parameters |
-| `0x01` | PCM-UP          | Device → Server    | Raw PCM audio chunk captured from the microphone   |
-| `0x02` | PCM-UP End      | Device → Server    | Signals the end of the user's utterance            |
-| `0x10` | PCM-DOWN        | Server → Device    | Raw PCM audio chunk to be played back on speaker   |
-| `0x11` | PCM-DOWN End    | Server → Device    | Signals the end of the assistant's audio response  |
-| `0x20` | Error           | Bidirectional      | Error notification; payload contains an error code |
-
----
-
-## Session Start Payload (type `0x00`)
-
-The Session Start frame payload carries audio format negotiation and device identification. All multi-byte integers are little-endian.
-
-| Field           | Size   | Type              | Description                                      |
-|-----------------|--------|-------------------|--------------------------------------------------|
-| `proto_version` | 1 byte | uint8             | Protocol version; currently `0x01`               |
-| `device_id`     | 4 bytes| uint32, LE        | Unique identifier for the device                 |
-| `sample_rate`   | 2 bytes| uint16, LE        | Audio sample rate in Hz (e.g. `0x3E80` = 16000)  |
-| `bit_depth`     | 1 byte | uint8             | Bits per sample (e.g. `16`)                      |
-| `channels`      | 1 byte | uint8             | Number of audio channels (e.g. `1` for mono)     |
-| `flags`         | 1 byte | uint8             | Reserved for future use; set to `0x00`           |
-
-Total payload size for Session Start: **10 bytes**.
-
----
-
-## Session Flow
-
-```
-Device                          Server
-  |                               |
-  |---[Session Start 0x00]------->|
-  |---[PCM-UP 0x01]-------------->|  (repeated)
-  |---[PCM-UP End 0x02]---------->|
-  |                               |--- Whisper STT
-  |                               |--- Qwen LLM
-  |                               |--- Piper TTS
-  |<--[PCM-DOWN 0x10]-------------|  (repeated)
-  |<--[PCM-DOWN End 0x11]---------|
-  |                               |
+```text
++--------------------------+------+-------------------+
+| payload_length_le (4 B)  | type | payload (N bytes) |
++--------------------------+------+-------------------+
 ```
 
-1. The device detects the wake word and sends a **Session Start** frame.
-2. The device streams microphone audio as a series of **PCM-UP** frames.
-3. When VAD detects end-of-speech, the device sends a **PCM-UP End** frame.
-4. The server transcribes the audio (Whisper), generates a response (Qwen), and synthesises speech (Piper).
-5. The server streams the synthesised audio back as a series of **PCM-DOWN** frames.
-6. The server sends **PCM-DOWN End** when the response audio is complete.
+Protocol version is currently `0x01`.
 
-Either party may send an **Error** frame at any point to abort the session.
+## Frame types
 
----
+| Value | Symbol | Direction | Payload | Purpose |
+|---:|---|---|---|---|
+| `0x00` | `FRAME_SESSION_START` | device → server | 10 bytes | Start one turn and declare audio format |
+| `0x01` | `FRAME_PCM_UP` | device → server | PCM bytes | Microphone audio |
+| `0x02` | `FRAME_PCM_UP_END` | device → server | empty | End microphone upload |
+| `0x10` | `FRAME_PCM_DOWN` | server → device | PCM bytes | Synthesized response audio |
+| `0x11` | `FRAME_PCM_DOWN_END` | server → device | empty | Definitive end of response |
+| `0x12` | `FRAME_REPLY_META` | server → device | exactly 1 byte | Whether another user reply is expected |
+| `0x20` | `FRAME_ERROR` | primarily server → device | code + optional UTF-8 | Abort/error report |
 
-## Audio Format
+## Session Start (`0x00`)
 
-| Parameter   | Value                                |
-|-------------|--------------------------------------|
-| Encoding    | 16-bit signed PCM, little-endian     |
-| Channels    | Mono (1 channel)                     |
-| Sample rate | 16000 Hz (default; set in Session Start) |
-| Chunk size  | Implementation-defined; typically 512–4096 samples per PCM frame |
+The payload is packed and always 10 bytes:
 
-Both PCM-UP and PCM-DOWN frames carry raw interleaved samples with no additional framing or headers within the payload.
+| Offset | Size | Field | Encoding/current value |
+|---:|---:|---|---|
+| 0 | 1 | `proto_version` | `0x01` |
+| 1 | 4 | `device_id` | uint32 little-endian |
+| 5 | 2 | `sample_rate` | uint16 little-endian; currently 16000 |
+| 7 | 1 | `bit_depth` | currently 16 |
+| 8 | 1 | `channels` | currently 1 |
+| 9 | 1 | `flags` | currently 0 |
 
----
+Firmware sends a new Session Start at the beginning of every turn, including wake-free follow-up turns on the existing socket.
 
-## Error Codes
+### Current validation limitation
 
-The **Error** frame (`0x20`) carries a 1-byte payload containing one of the following error codes:
+At the audited implementation, version, payload length, and declared format are not comprehensively rejected when invalid. Treat the 10-byte version-1, 16 kHz, mono, 16-bit format as mandatory. Future hardening should enforce it before allocating or consuming audio.
 
-| Code   | Name            | Description                                      |
-|--------|-----------------|--------------------------------------------------|
-| `0x00` | Success         | No error (informational)                         |
-| `0x01` | Generic Error   | Unspecified or unknown error                     |
-| `0x02` | STT Failure     | Whisper speech-to-text transcription failed      |
-| `0x03` | LLM Failure     | Language model inference failed                  |
-| `0x04` | TTS Failure     | Piper text-to-speech synthesis failed            |
+## Uplink audio (`0x01`, `0x02`)
 
-On receiving an Error frame, both sides should discard any buffered audio and return to the idle/listening state.
+`FRAME_PCM_UP` carries raw signed 16-bit little-endian mono PCM without a WAV header. The device normally sends 800 samples, or 1600 bytes, per frame; shorter even-sized frames can occur after short ring reads.
+
+The device sends `FRAME_PCM_UP_END` with an empty payload when VAD ends the utterance or the turn reaches its maximum duration.
+
+The bridge currently caps accumulated upload bytes at 320000, equivalent to 10 seconds at 16 kHz mono s16le. This cap is fixed and is not recomputed from the format declared in Session Start.
+
+## Downlink audio (`0x10`, `0x11`)
+
+`FRAME_PCM_DOWN` carries raw signed 16-bit little-endian mono PCM. The firmware consumes a downlink frame in chunks of at most 512 bytes and places samples into the playback ring; the audio task duplicates mono to stereo for I2S output.
+
+Payload size must be even. The current implementation relies on a trusted server rather than rejecting every malformed size.
+
+`FRAME_PCM_DOWN_END` has an empty payload and is the definitive response terminator. It follows all downlink audio and any Reply Meta frame.
+
+The endpoint drains the playback ring and DMA tail before completing a normal turn.
+
+## Reply Meta (`0x12`)
+
+Reply Meta has exactly one payload byte:
+
+| Value | Meaning |
+|---:|---|
+| `0` | Final answer; close this conversation after playback |
+| `1` | Charlie expects another user utterance |
+
+Reply Meta is sent after the final `PCM_DOWN` frame and before `PCM_DOWN_END`.
+
+The payload must remain exactly one byte. Current firmware reads the first byte only and does not consume surplus bytes; a longer payload would desynchronize framing.
+
+## Error (`0x20`)
+
+The backend encodes Error as:
+
+```text
+byte 0     error code
+bytes 1..  optional UTF-8 message
+```
+
+Current backend paths generally use code `1` for a generic error. The older conceptual taxonomy of separate STT, LLM, and TTS codes is not consistently implemented and must not be treated as a stable API.
+
+Firmware does not normally send Error frames. User cancellation is represented by closing the TCP connection, not by an Error or Cancel frame.
+
+Keep Error payloads at or below 255 bytes with the current firmware. Its receiver truncates its local read and does not safely drain oversized surplus data.
+
+## Normal one-turn flow
+
+```text
+Device                                      Bridge
+  |                                            |
+  |--- SESSION_START ------------------------->|
+  |--- PCM_UP × N ---------------------------->|
+  |--- PCM_UP_END ---------------------------->|
+  |                                            |  STT → Hermes/Qwen → TTS
+  |<-- PCM_DOWN × N ---------------------------|
+  |<-- REPLY_META {0} -------------------------|
+  |<-- PCM_DOWN_END ---------------------------|
+  |                                            |
+  +---------------- close socket --------------+
+```
+
+UI sequence is normally Ready → Listening → Processing → Speaking → Ready. Speaking begins only on receipt of the first PCM Down frame.
+
+## Follow-up flow
+
+```text
+Device                                      Bridge
+  |--- SESSION_START (turn 1) ---------------->|
+  |--- PCM_UP × N / PCM_UP_END -------------->|
+  |<-- PCM_DOWN × N ---------------------------|
+  |<-- REPLY_META {1} -------------------------|
+  |<-- PCM_DOWN_END ---------------------------|
+  |       wait for playback tail               |
+  |--- SESSION_START (turn 2, same socket) ---->|
+  |--- PCM_UP × N / PCM_UP_END -------------->|
+  |<-- PCM_DOWN × N ---------------------------|
+  |<-- REPLY_META {0} -------------------------|
+  |<-- PCM_DOWN_END ---------------------------|
+  +---------------- close socket --------------+
+```
+
+Firmware permits at most five consecutive follow-up turns. Follow-up capture starts without WakeNet. Before VAD sees speech, the display presents Ready; it changes to Listening when speech begins.
+
+If the user remains silent, the normal turn timeout produces an empty upload. The server returns an end response without another positive Reply Meta; firmware exits follow-up mode and closes the socket.
+
+## Cancellation
+
+There is no cancel frame. A short tap during a conversation sets a local cancellation flag. Receive waits poll at approximately 200 ms, then the endpoint returns to Ready and closes the TCP socket. The bridge observes EOF, connection reset, or broken pipe and abandons the session.
+
+A future explicit cancel frame would need to define interaction with queued TTS, tool calls, and backend history before it can replace this behavior.
+
+## Audio format
+
+| Parameter | Current value |
+|---|---|
+| Encoding | signed PCM, 16-bit little-endian |
+| Channels | mono on wire |
+| Sample rate | 16000 Hz |
+| Uplink gain | 10× with saturation after raw-domain VAD starts |
+| Downlink chunking | bridge sends approximately 50 ms chunks |
+
+No RIFF/WAV header appears in PCM Up or PCM Down payloads. The bridge adds WAV framing only when calling HTTP audio services.
+
+## Connection and timeout behavior
+
+- One TCP connection per wake-word conversation
+- Same socket reused for follow-up turns only
+- Device send timeout: 2 seconds
+- Device receive timeout: 30 seconds
+- Active response receive loop checks cancellation approximately every 200 ms
+- Device turn cap: 10 seconds
+- Bridge upload cap: 320000 bytes
+- Follow-up cap: five turns
+
+## Parser safety requirements
+
+Protocol work should preserve these requirements:
+
+1. Bound incoming payload sizes before allocation.
+2. Validate Session Start length, version, sample rate, depth, and channels.
+3. Require even PCM payload lengths.
+4. Require Reply Meta length exactly one.
+5. Consume or reject an entire Error payload; never truncate without draining.
+6. Treat premature EOF as a connection close and break the server's per-connection loop.
+7. Do not swallow `IncompleteReadError`, `ConnectionResetError`, or `BrokenPipeError`; doing so can create an infinite empty-session loop.
+8. Keep PCM Down End as the definitive response terminator even when Reply Meta is present.
+
+## Source locations
+
+| Side | File |
+|---|---|
+| Shared firmware constants and structs | `firmware/components/net/include/protocol.h` |
+| Firmware session state machine | `firmware/components/net/net_stream.c` |
+| Backend frame codec | `backend/protocol.py` |
+| Backend turn processing | `backend/session.py` |
+| Backend connection/history loop | `backend/server.py` |
+| Manual protocol client | `tools/e2e/test_client.py` |
+
+The E2E client currently skips Reply Meta and does not submit a second turn. Extend it before using it as full follow-up protocol coverage.
