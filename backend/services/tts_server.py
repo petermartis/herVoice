@@ -8,6 +8,7 @@ Returns: WAV bytes (native engine rate; client resamples).
 import argparse
 import io
 import logging
+import os
 import sys
 import threading
 import time
@@ -26,6 +27,10 @@ class TTSService:
         self._kokoro = None
         self._piper = None
         self._piper_rate = 22050
+        self._el_key      = os.environ.get("ELEVENLABS_API_KEY", "")
+        self._el_voice_id = os.environ.get("ELEVENLABS_SK_VOICE_ID", "")
+        self._el_model    = os.environ.get("ELEVENLABS_MODEL",
+                                           "eleven_multilingual_v2")
 
     def load(self) -> None:
         # Kokoro (English) — lazy import; heavy
@@ -34,11 +39,21 @@ class TTSService:
         self._kokoro = KPipeline(lang_code="a")  # American English
         log.info("Kokoro loaded in %.1fs", time.perf_counter() - t0)
 
-        # Piper (Slovak)
+        # Slovak: ElevenLabs (cloud, "Suzie") is primary; Piper only as an
+        # offline fallback when the key/voice are not configured.
+        if self._el_key and self._el_voice_id:
+            log.info("Slovak TTS: ElevenLabs voice=%s model=%s",
+                     self._el_voice_id, self._el_model)
+        else:
+            log.warning("ELEVENLABS_API_KEY / ELEVENLABS_SK_VOICE_ID not set; "
+                        "loading Piper sk_SK-lili as Slovak fallback")
+            self._load_piper()
+
+    def _load_piper(self) -> None:
         t0 = time.perf_counter()
         import piper
-        import os
-        voice_path = os.environ.get("PIPER_VOICE_PATH", "/home/foscam/herVoice/piper-voices/sk_SK-lili-medium.onnx")
+        voice_path = os.environ.get("PIPER_VOICE_PATH",
+                                    "/home/foscam/herVoice/piper-voices/sk_SK-lili-medium.onnx")
         self._piper = piper.PiperVoice.load(voice_path)
         self._piper_rate = self._piper.config.sample_rate
         log.info("Piper sk_SK-lili-medium loaded in %.1fs (rate=%d)",
@@ -53,11 +68,80 @@ class TTSService:
         return _wav(pcm, 24000), 24000
 
     def synth_sk(self, text: str) -> tuple[bytes, int]:
-        """Piper -> (wav_bytes, native rate)."""
+        """Slovak -> (wav_bytes, rate). ElevenLabs primary, Piper fallback."""
+        if self._el_key and self._el_voice_id:
+            try:
+                return self._synth_sk_elevenlabs(text)
+            except Exception as e:
+                log.warning("ElevenLabs SK failed (%s); Piper fallback", e)
+                if self._piper is None:
+                    raise
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             self._piper.synthesize_wav(text, wf)
         return buf.getvalue(), self._piper_rate
+
+    def _synth_sk_elevenlabs(self, text: str) -> tuple[bytes, int]:
+        """Call the ElevenLabs TTS API; return 16 kHz mono WAV bytes.
+        Retries once and validates the response: ElevenLabs sometimes
+        returns a non-PCM error body (or truncated PCM) on an HTTP 200,
+        which used to crash np.frombuffer and drop the Slovak reply."""
+        import urllib.request
+        import json as _json
+        import time as _time
+        import subprocess
+        url = ("https://api.elevenlabs.io/v1/text-to-speech/"
+               f"{self._el_voice_id}")
+        body = _json.dumps({
+            "text": text,
+            "model_id": self._el_model,
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            "output_format": "pcm_16000",
+        }).encode()
+        last_err = None
+        for attempt in (1, 2):
+            try:
+                req = urllib.request.Request(
+                    url, data=body, method="POST",
+                    headers={"xi-api-key": self._el_key,
+                             "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    if r.status != 200:
+                        raise RuntimeError("ElevenLabs HTTP %d" % r.status)
+                    raw = r.read()
+                if len(raw) < 500:
+                    raise RuntimeError(
+                        "ElevenLabs returned only %d bytes: %r"
+                        % (len(raw), raw[:120]))
+                # eleven_multilingual_v2 ignores output_format and returns
+                # MP3 (audio/mpeg, ID3/Lavf) even for pcm_16000/pcm_24000.
+                # Reading the compressed bytes as raw int16 gave a truncated,
+                # noisy clip with a DC rail. Detect the format; decode MP3 ->
+                # 16 kHz mono s16le with ffmpeg (always present on the box).
+                is_mp3 = raw[:3] == b"ID3" or (raw[0] & 0xFF) == 0xFF
+                if is_mp3:
+                    p2 = subprocess.run(
+                        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                         "-i", "pipe:0", "-ar", "16000", "-ac", "1",
+                         "-f", "s16le", "pipe:1"],
+                        input=raw, capture_output=True, timeout=30)
+                    if p2.returncode != 0 or not p2.stdout:
+                        raise RuntimeError("ffmpeg decode failed rc=%s: %s"
+                                           % (p2.returncode, p2.stderr[:200]))
+                    pcm_bytes = p2.stdout
+                else:
+                    pcm_bytes = raw
+                    if len(pcm_bytes) % 2:
+                        pcm_bytes = pcm_bytes[:-1]
+                pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
+                if len(pcm) < 800:
+                    raise RuntimeError("decoded PCM too short: %d samples" % len(pcm))
+                return _wav(pcm, 16000), 16000
+            except Exception as e:
+                last_err = e
+                log.warning("ElevenLabs SK attempt %d failed: %s", attempt, e)
+                _time.sleep(0.6 * attempt)
+        raise RuntimeError("ElevenLabs SK TTS failed: %s" % last_err)
 
     def synthesize(self, text: str, lang: str) -> bytes:
         with self._lock:  # engines are not thread-safe

@@ -81,7 +81,7 @@ class HerVoiceServer:
                                       sticky_lang=convo_lang)
                 await session.run()
                 if session.lang_confirmed:
-                    convo_lang = session.lang
+                    convo_lang = session.reply_lang or session.lang
             except (ConnectionResetError, asyncio.IncompleteReadError,
                     BrokenPipeError, FrameError):
                 log.info("Client %s:%s disconnected", *peer)

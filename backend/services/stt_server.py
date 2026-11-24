@@ -59,17 +59,29 @@ class STTService:
     def transcribe(self, audio: bytes, language: str | None, sample_rate: int = SAMPLE_RATE) -> dict:
         audio_f32 = self._to_mono_f32(audio, sample_rate)
         t0 = time.perf_counter()
+        forced = language not in (None, "", "auto")
         segments, info = self.model.transcribe(
             audio_f32,
-            language=None if language in (None, "", "auto") else language,
+            language=language if forced else None,
             beam_size=1,
-            vad_filter=True,
+            vad_filter=False,
             vad_parameters={"min_silence_duration_ms": 300},
         )
+        # EN/SK-only policy: Whisper auto-detect spans ~99 languages and
+        # confuses closely-related ones (Slovak/English often land as pl/cs).
+        # If auto-detection is not en/sk, re-transcribe as Slovak so the
+        # transcript and language stay within the EN/SK contract.
+        detected = info.language
+        if not forced and detected not in ("en", "sk"):
+            segments, info = self.model.transcribe(
+                audio_f32, language="sk", beam_size=1, vad_filter=False,
+                vad_parameters={"min_silence_duration_ms": 300},
+            )
+            detected = "sk"
         text = " ".join(s.text.strip() for s in segments).strip()
         return {
             "text": text,
-            "language": info.language,
+            "language": detected,
             "duration": round(info.duration, 2),
             "seconds": round(time.perf_counter() - t0, 2),
         }

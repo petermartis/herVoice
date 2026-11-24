@@ -23,7 +23,7 @@ _SK_HINT = "Odpoveď prosím po slovensky. "
 
 
 def _voice_payload(messages: list[dict]) -> dict:
-    """Streaming payload for the Hermes commercial voice path."""
+    """Streaming payload for the explicit local Hermes voice path."""
     p = {
         "model": config.HERMES_LLM_MODEL,
         "provider": config.HERMES_LLM_PROVIDER,
@@ -31,7 +31,7 @@ def _voice_payload(messages: list[dict]) -> dict:
         "stream": True,
     }
     if config.HERMES_DISABLE_THINKING:
-        p["model_options"] = {"reasoning": {"enabled": False}}
+        p["chat_template_kwargs"] = {"enable_thinking": False}
     return p
 
 
