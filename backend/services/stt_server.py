@@ -35,15 +35,22 @@ LANGS = ("en", "sk")
 # dictionary - it strongly steers short noisy clips toward the words this
 # home actually says instead of phonetic guesses from other languages.
 _DOMAIN_PROMPTS = {
-    "sk": ("Dobrý deň. Skontroluj, či je brána zatvorená. Brána je otvorená. "
-           "Zavri bránu. Kto je doma? Vypni svetlá v obývačke. Aká je teplota "
-           "v spálni? Zamkni vchodové dvere. Zhasni. Koľko je hodín? Ďakujem. "
-           "Povedz mi predpoveď počasia aj na zajtra. Aké bude zajtra počasie "
-           "v Bratislave? Dnes prší? Bude snežiť? Vonkajšia teplota."),
-    "en": ("Good morning. Check if the gate is closed. The gate is open. "
-           "Close the gate. Who is home? Turn off the lights in the living "
-           "room. What is the temperature in the bedroom? Lock the front "
-           "door. Thank you."),
+    # Must NOT end with a short standalone phrase: Whisper hallucinates the
+    # prompt tail verbatim onto weak audio ("...Dakujem." became the literal
+    # transcript for a gate question). Start and end with content-dense
+    # multi-word sentences.
+    "sk": ("Skontroluj, či je brána zatvorená a zavri bránu. Brána je teraz "
+           "otvorená. Kto je dnes doma a kto je vonku? Vypni svetlá v "
+           "obývačke a zhasni v kuchyni. Aká je teplota v spálni a koľko "
+           "stupňov je vonku? Zamkni vchodové dvere a skontroluj garáž. "
+           "Povedz mi predpoveď počasia aj na zajtra, aké bude počasie "
+           "v Bratislave, bude pršať alebo snežiť?"),
+    "en": ("Check if the gate is closed and close the gate. The gate is open "
+           "right now. Who is home today and who is outside? Turn off the "
+           "lights in the living room and the kitchen. What is the bedroom "
+           "temperature and what is the outdoor temperature? Lock the front "
+           "door and check the garage door too. What is the weather forecast "
+           "for tomorrow in Bratislava, will it rain or snow?"),
 }
 
 
@@ -118,7 +125,7 @@ class STTService:
         # + a domain initial_prompt keep output in the household lexicon.
         segments, info = model.transcribe(
             audio_f32, language=language, beam_size=5, vad_filter=False,
-            condition_on_previous_text=False,
+            condition_on_previous_text=False, repetition_penalty=1.15,
             initial_prompt=_DOMAIN_PROMPTS.get(language))
         text = " ".join(s.text.strip() for s in segments).strip()
         return text, language, probs, info.duration
