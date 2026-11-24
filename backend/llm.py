@@ -20,6 +20,7 @@ import config
 
 # Prepended when detected language is Slovak to nudge the model to reply in Slovak
 _SK_HINT = "Odpoveď prosím po slovensky. "
+_EN_HINT = "Please answer in English. "
 
 # Injected into the user message on the gateway path: the backend's voice
 # rules ride as a system message under the FULL agent persona (17k tokens),
@@ -73,13 +74,15 @@ class LlamaLLM:
             log.warning("aiohttp unavailable, returning stub LLM response")
             return "I heard you, but I'm currently in stub mode."
 
-        # Build messages: system prompt + history
-        # For Slovak, prepend a language hint to the last user message
+        # Prepend a language hint to the last user message (both languages:
+        # an un-hinted garbled clip lets the surrounding Slovak context leak
+        # into English answers)
         messages = list(history)
-        if lang == "sk" and messages and messages[-1]["role"] == "user":
+        if lang in ("sk", "en") and messages and messages[-1]["role"] == "user":
+            hint = _SK_HINT if lang == "sk" else _EN_HINT
             messages = messages[:-1] + [
                 {"role": "user",
-                 "content": _SK_HINT + messages[-1]["content"]}
+                 "content": hint + messages[-1]["content"]}
             ]
         if config.LLM_NO_THINK and messages and messages[-1]["role"] == "user":
             # Qwen3 thinking models: /no_think skips reasoning tokens (voice latency)
@@ -211,9 +214,10 @@ class HermesLLM:
                 "role": "system",
                 "content": config.LLM_VOICE_SYSTEM_PROMPT,
             }
-        if lang == "sk" and messages and messages[-1]["role"] == "user":
+        if lang in ("sk", "en") and messages and messages[-1]["role"] == "user":
+            hint = _SK_HINT if lang == "sk" else _EN_HINT
             messages = messages[:-1] + [
-                {"role": "user", "content": _SK_HINT + messages[-1]["content"]}
+                {"role": "user", "content": hint + messages[-1]["content"]}
             ]
         try:
             t0 = time.time()
