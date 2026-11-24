@@ -114,12 +114,12 @@ Do not accept a firmware build merely because it flashed. A clean boot must show
 
 - PSRAM initialized in the expected OCT/OPI mode
 - preferred two-second playback ring allocated in PSRAM
-- WakeNet model list loaded and `wn9_sophia_tts` created
+- Wake engine started: microWakeWord `charlie` model loaded from the app binary (or WakeNet `wn9_sophia_tts` created when built with `CONFIG_HERVOICE_WAKE_ENGINE_WAKENET`)
 - audio capture and playback initialized
 - boot tone audible
 - touch controller identified after a real power cycle
 - Wi-Fi `GOT_IP`
-- network, capture, WakeNet, touch, and UI tasks running
+- network, capture, wake detection, touch, and UI tasks running
 - stable Ready state
 - no abort, reset loop, panic, watchdog, or repeated allocation failure
 
@@ -138,18 +138,49 @@ Then test:
 
 ### Boot order
 
-Keep WakeNet model loading before I2S initialization:
+Keep WakeNet model loading before I2S initialization (WakeNet build; the microWakeWord model is embedded and has no runtime load step):
 
 ```text
 NVS → UI → esp_srmodel_init → wake_init → audio_init → test tone
-    → capture task → WakeNet task → touch → Wi-Fi → network task
+    → capture task → wake detection task → touch → Wi-Fi → network task
 ```
 
 Model creation after I2S DMA has caused intermittent model-parser corruption and `LoadProhibited` resets.
 
 ### Shared microphone ring
 
-WakeNet and session upload read the same capture ring. Suspend wake detection before a voice session and resume it only after the TTS tail and a short delay. If both readers run concurrently, each receives fragments of the utterance.
+The wake engine and session upload read the same capture ring. Suspend wake detection before a voice session and resume it only after the TTS tail and a short delay. If both readers run concurrently, each receives fragments of the utterance. The microWakeWord engine additionally ignores the first ~7.4 s of features after each start (`MIN_SLICES_BEFORE_DETECTION`), so detection benches must wait before the first playback after a reset.
+
+### Wake engine build toggle and retraining
+
+The wake engine is a Kconfig choice in `components/wake/Kconfig`:
+`CONFIG_HERVOICE_WAKE_ENGINE_MWW` (default) builds the microWakeWord engine
+(`wakeword_mww.cpp`, vendored `components/micro_wake_word/`), and
+`CONFIG_HERVOICE_WAKE_ENGINE_WAKENET` builds the original ESP-SR WakeNet path.
+The active model binary lives at `components/wake/model/charlie_ss_quant.tflite`
+and is embedded via `target_add_binary_data` in the wake component CMakeLists;
+it must be registered after `idf_component_register`.
+
+Retraining runs offline (LLM box, CPU-only). Pipeline: ElevenLabs + piper
+synthesis, playback through a speaker, re-record through the puck mic array,
+clean clips, `microwakeword` feature generation and training, export of
+`stream_state_internal_quant.tflite`, replace the model file, rebuild and flash.
+Model input is `(1, 3, 40)` int8 features, output `(1, 1)` uint8 probability;
+the firmware feeds 3 new feature frames per inference at a 10 ms step.
+
+Two traps found the hard way:
+
+1. Call `set_features_step_size()` **before** `setup()` — the frontend config
+   captures the step at setup time, and a step of 0 leaves the window buffer
+   frozen: features flatten to -128 and probability pins at 0.
+2. `model_train_eval` TFLite export asserts representative-spectrogram length
+   divisible by the stride; the local repo copy slices instead of asserting.
+
+Benching: play held-out clips through the room speaker at moderate volume —
+over-loud corpus playback trains the model off the real acoustic range; the v3
+corpus was rescaled to 80%. Parse serial live for the wake event, and wait
+about 12 s after each detection before the next clip so the engine re-arms.
+Record both recall and a 3-minute idle false-positive run at the target cutoff.
 
 ### VAD before gain
 
@@ -321,7 +352,7 @@ Production-microphone collection mode is driven by `/tmp/hervoice_record_state.j
 
 ### Product work
 
-1. Train and deploy a custom **Charlie** wake-word model; keep Sophia and tap as evaluation controls.
+1. ~~Train and deploy a custom **Charlie** wake-word model~~ — done: microWakeWord `charlie` (v3 corpus, 7/8 recall / 0 FP per 3 min idle at cutoff 0.97); Sophia and tap remain as evaluation controls.
 2. Retain disputed-turn audio with bounded, privacy-aware retention to diagnose Whisper hallucinations.
 3. Remove temporary full-screen display diagnostics and debug logs after confirming no remaining dependency on them.
 4. Improve Slovak follow-up detection for statement-form questions without punctuation.

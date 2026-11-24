@@ -19,7 +19,7 @@ herVoice is the low-latency voice endpoint for Charlie. The system is designed t
 
 The endpoint is a Waveshare ESP32-S3-Touch-LCD-1.85C V2. It owns real-time interaction:
 
-- WakeNet detection with `wn9_sophia_tts`
+- Wake detection with a custom microWakeWord **Charlie** TFLite model (default) or ESP-SR WakeNet `wn9_sophia_tts` via `CONFIG_HERVOICE_WAKE_ENGINE`
 - Microphone capture through ES7210
 - Raw-energy VAD and utterance endpointing
 - Framed TCP upload and response reception
@@ -78,8 +78,8 @@ ESP32                  Bridge              STT             Hermes/Qwen          
 
 ### Device capture and endpointing
 
-1. WakeNet or a short idle tap posts a wake event.
-2. The network task suspends WakeNet before consuming microphone samples. WakeNet and session upload share one capture ring; allowing both readers would split the utterance.
+1. The wake engine or a short idle tap posts a wake event.
+2. The network task suspends the wake engine before consuming microphone samples. The wake engine and session upload share one capture ring; allowing both readers would split the utterance.
 3. Firmware connects to `CONFIG_HERVOICE_SERVER_HOST:CONFIG_HERVOICE_SERVER_PORT`, currently `192.168.1.35:8765`.
 4. Firmware sends `SESSION_START` with protocol version, device ID, and audio format.
 5. Before speech begins, blocks below the start threshold are discarded.
@@ -174,16 +174,16 @@ The main boot order is:
 2. display/UI
 3. idle UI state
 4. `esp_srmodel_init("model")`
-5. `wake_init()` and WakeNet model creation
+5. `wake_init()` and wake-engine model creation
 6. `audio_init()`
 7. 440 Hz, 600 ms speaker test tone
 8. capture task
-9. WakeNet task
+9. Wake detection task
 10. touch
 11. non-blocking Wi-Fi initialization
 12. network stream task
 
-WakeNet model creation must remain before `audio_init()` and before I2S DMA. Reversing this order has caused intermittent model corruption and `LoadProhibited` failures.
+WakeNet model creation must remain before `audio_init()` and before I2S DMA (WakeNet path only). Reversing this order has caused intermittent model corruption and `LoadProhibited` failures. The microWakeWord path embeds its model in the app binary and has no partition-loading step.
 
 ### Memory ownership
 
@@ -224,7 +224,7 @@ After an esptool hard reset, CST816S can remain unresponsive until USB power is 
 
 ### Firmware
 
-Wi-Fi credentials live only in gitignored `firmware/sdkconfig`. Important Kconfig values include server host/port, sample rate, device ID, and wake model. The active detector keeps the WakeNet model's own calibrated threshold (0.647 for `wn9_sophia_tts`); forcing the engine minimum of 0.4 let ambient sound open sessions several times an hour. The `CONFIG_HERVOICE_WAKE_THRESHOLD` setting is not wired into the current detector.
+Wi-Fi credentials live only in gitignored `firmware/sdkconfig`. Important Kconfig values include server host/port, sample rate, device ID, and the wake engine choice. The active detector is microWakeWord Charlie with `CONFIG_HERVOICE_MWW_CUTOFF_PCT=97` (sliding-window probability threshold; 0 false wakes per 3 min of room ambient, 7/8 recall on held-out clips). Historical WakeNet note: `wn9_sophia_tts` kept its calibrated threshold of 0.647; forcing the engine minimum of 0.4 let ambient sound open sessions several times an hour. `CONFIG_HERVOICE_WAKE_THRESHOLD` is only wired into the WakeNet path.
 
 ### Bridge environment
 

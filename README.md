@@ -9,7 +9,7 @@ The production system supports **English and Slovak only**. The language chosen 
 | Layer | Current implementation |
 |---|---|
 | Endpoint | Waveshare ESP32-S3-Touch-LCD-1.85C V2 |
-| Wake word | ESP-SR WakeNet `wn9_sophia_tts`; tap is the manual trigger |
+| Wake word | microWakeWord custom **Charlie** model (TFLite, embedded in app binary); WakeNet `wn9_sophia_tts` kept as a build-time option; tap is the manual trigger |
 | Endpointing | Raw-RMS VAD in firmware, before 10× STT upload gain |
 | Device transport | Framed TCP PCM, device → backend `192.168.1.35:8765` |
 | Speech recognition | faster-whisper `large-v3-turbo` on the GPU (`int8_float16`, automatic CPU fallback), service on port `15556` |
@@ -21,7 +21,7 @@ The production system supports **English and Slovak only**. The language chosen 
 | Conversation behavior | Transcript held by the Hermes gateway per conversation, sentence-streamed TTS, wake-free follow-ups |
 | Household knowledge | Private context file outside the repository (`HERVOICE_CONTEXT_FILE`) |
 
-The active firmware wake word is **Sophia**, not Charlie. A custom Charlie model remains future work.
+The active firmware wake word is **Charlie**, a custom microWakeWord model trained on device-recorded and synthetic utterances and embedded in the app binary. Sophia (WakeNet) remains one Kconfig choice away (`CONFIG_HERVOICE_WAKE_ENGINE_WAKENET`) for A/B evaluation.
 
 ## System topology
 
@@ -53,8 +53,8 @@ See [docs/architecture.md](docs/architecture.md) for the complete runtime design
 
 ## Voice-turn flow
 
-1. WakeNet detects Sophia, or the user taps the display.
-2. Firmware suspends WakeNet so it cannot consume samples from the same microphone ring during a session.
+1. The wake engine detects **Charlie**, or the user taps the display.
+2. Firmware suspends the wake engine so it cannot consume samples from the same microphone ring during a session.
 3. Firmware opens a TCP connection to the bridge and sends `SESSION_START`.
 4. Raw-RMS VAD waits for speech, then sends amplified 16 kHz mono s16le audio in `PCM_UP` frames.
 5. After 600 ms of trailing silence, or at the 10-second cap, firmware sends `PCM_UP_END`.

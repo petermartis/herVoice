@@ -1,0 +1,5 @@
+menu "MicStreamer"
+    config HERVOICE_SAMPLE_RATE
+        int "Sample rate Hz"
+        default 16000
+endmenu

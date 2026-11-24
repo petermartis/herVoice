@@ -1,0 +1,24 @@
+menu "Wake word engine"
+
+    choice HERVOICE_WAKE_ENGINE
+        prompt "Wake word detection engine"
+        default HERVOICE_WAKE_ENGINE_WAKENET
+        help
+            Which engine listens for the wake word. WakeNet is the
+            original closed Espressif path (wn9_sophia_tts); microWakeWord
+            runs the open "charlie" TFLite streaming model.
+
+    config HERVOICE_WAKE_ENGINE_WAKENET
+        bool "WakeNet (wn9_sophia_tts, esp-sr)"
+
+    config HERVOICE_WAKE_ENGINE_MWW
+        bool "microWakeWord (charlie tflite)"
+
+    endchoice
+
+    config HERVOICE_MWW_CUTOFF_PCT
+        int "microWakeWord detection cutoff (percent, 1-99)"
+        depends on HERVOICE_WAKE_ENGINE_MWW
+        default 97
+
+endmenu

@@ -35,3 +35,10 @@ backend/venv/
 config.local.py
 build/
 sdkconfig
+
+# mic_streamer tool build artifacts (sdkconfig holds Wi-Fi credentials)
+tools/*/build/
+tools/*/.cache/
+tools/*/sdkconfig
+tools/*/dependencies.lock
+tools/*/managed_components/
