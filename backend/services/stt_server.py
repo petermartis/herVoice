@@ -31,6 +31,19 @@ log = logging.getLogger("STT")
 SAMPLE_RATE = 16000
 LANGS = ("en", "sk")
 
+# Style/vocabulary bias for Whisper decoding (initial_prompt). Not a hard
+# dictionary - it strongly steers short noisy clips toward the words this
+# home actually says instead of phonetic guesses from other languages.
+_DOMAIN_PROMPTS = {
+    "sk": ("Dobrý deň. Skontroluj, či je brána zatvorená. Brána je otvorená. "
+           "Zavri bránu. Kto je doma? Vypni svetlá v obývačke. Aká je teplota "
+           "v spálni? Zamkni vchodové dvere. Zhasni. Koľko je hodín? Ďakujem."),
+    "en": ("Good morning. Check if the gate is closed. The gate is open. "
+           "Close the gate. Who is home? Turn off the lights in the living "
+           "room. What is the temperature in the bedroom? Lock the front "
+           "door. Thank you."),
+}
+
 
 class STTService:
     def __init__(self, model_size: str, device: str, compute_type: str):
@@ -97,7 +110,14 @@ class STTService:
             # are often scored as Polish or Czech with Slovak itself near zero,
             # so comparing en against sk alone files them as English.
             language = "en" if all_probs and all_probs[0][0] == "en" else "sk"
-        segments, info = model.transcribe(audio_f32, language=language, beam_size=1, vad_filter=False)
+        # Greedy decoding on 1-2 s room clips produced phonetic gibberish
+        # ("Česomarete a Brana" for "či som zavrel bránu"): the language
+        # token only biases the decode, it is not a dictionary. Beam search
+        # + a domain initial_prompt keep output in the household lexicon.
+        segments, info = model.transcribe(
+            audio_f32, language=language, beam_size=5, vad_filter=False,
+            condition_on_previous_text=False,
+            initial_prompt=_DOMAIN_PROMPTS.get(language))
         text = " ".join(s.text.strip() for s in segments).strip()
         return text, language, probs, info.duration
 
