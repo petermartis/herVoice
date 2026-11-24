@@ -37,7 +37,9 @@ LANGS = ("en", "sk")
 _DOMAIN_PROMPTS = {
     "sk": ("Dobrý deň. Skontroluj, či je brána zatvorená. Brána je otvorená. "
            "Zavri bránu. Kto je doma? Vypni svetlá v obývačke. Aká je teplota "
-           "v spálni? Zamkni vchodové dvere. Zhasni. Koľko je hodín? Ďakujem."),
+           "v spálni? Zamkni vchodové dvere. Zhasni. Koľko je hodín? Ďakujem. "
+           "Povedz mi predpoveď počasia aj na zajtra. Aké bude zajtra počasie "
+           "v Bratislave? Dnes prší? Bude snežiť? Vonkajšia teplota."),
     "en": ("Good morning. Check if the gate is closed. The gate is open. "
            "Close the gate. Who is home? Turn off the lights in the living "
            "room. What is the temperature in the bedroom? Lock the front "
