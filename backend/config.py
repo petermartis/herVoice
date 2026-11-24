@@ -106,7 +106,10 @@ _VOICE_RULES = (
     "loud>\", \"followup\": true|false}. Set followup to true ONLY when your "
     "reply asks the user a question or needs their input, EVEN WHEN PHRASED "
     "AS A STATEMENT, e.g. 'Tell me which room.' => true. The reply field must "
-    "contain only plain spoken text."
+    "contain only plain spoken text. The reply must START with the answer "
+    "itself: no preamble, no reaction to the question ('yes, something is "
+    "happening'), no echoing words the microphone probably misheard - a "
+    "state question is answered by stating the state. "
 )
 
 LLM_VOICE_SYSTEM_PROMPT = (
