@@ -21,6 +21,19 @@ import config
 # Prepended when detected language is Slovak to nudge the model to reply in Slovak
 _SK_HINT = "Odpoveď prosím po slovensky. "
 
+# Injected into the user message on the gateway path: the backend's voice
+# rules ride as a system message under the FULL agent persona (17k tokens),
+# and the small model sometimes drowns them and replies with a bare plan
+# ("# Checking gate sensor state") without ever calling a tool. Instructions
+# riding on the user turn carry far more weight than the system tail.
+_VOICE_DIRECTIVE = (
+    "\n\n[VOICE: a question about a current state (gate, doors, lock, lights, "
+    "temperature, weather, who is home) REQUIRES calling the matching "
+    "mcp__homey__* tool in this turn FIRST, then answering with ONLY the JSON "
+    "object. A reply that only announces a plan or status without a tool "
+    "result is wrong. Reply in the language the user just spoke.]"
+)
+
 
 def _voice_payload(messages: list[dict]) -> dict:
     """Streaming payload for the explicit local Hermes voice path."""
@@ -271,6 +284,9 @@ class HermesLLM:
         if conversation_id:
             # The gateway already holds the earlier turns of this conversation.
             messages = [messages[0]] + [m for m in messages[-1:] if m.get("role") == "user"]
+        if messages and messages[-1].get("role") == "user":
+            messages[-1] = {**messages[-1],
+                            "content": messages[-1]["content"] + _VOICE_DIRECTIVE}
         emitted = False
         try:
             async for d in self.stream(messages, conversation_id):

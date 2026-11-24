@@ -23,6 +23,26 @@ import config
 
 _SK_CHARS = frozenset("áčďéíľňôšťúýžÁČĎÉÍĽŇÔŠŤÚÝŽ")
 
+# Slovak content words that survive even when the model drops diacritics.
+_SK_WORDS = re.compile(r"\b(ano|nie|je|su|boli|budem|uz|ešte|brana|svetlo|svetla|"
+                       r"zatvorena|otvorena|dvere|zamknute|teplota|odpovedam|"
+                       r"skontrol|zavrela|zavrel|otvorila|nemozem|moziem)\b", re.I)
+# Announcement-only replies: markdown headings or "Checking ..." openers.
+_NARRATION = re.compile(r"^\s*(#|\**\s*(check|skontrol|over)|looking)", re.I)
+
+
+def _reply_is_bad(reply: str, lang: str) -> bool:
+    """True when a streamed-without-JSON reply must not be spoken: empty,
+    a bare plan/announcement, or the wrong language for a Slovak turn."""
+    if not reply or len(reply.strip()) < 3:
+        return True
+    if _NARRATION.match(reply):
+        return True
+    if lang == "sk" and not any(c in _SK_CHARS for c in reply) \
+            and not _SK_WORDS.search(reply):
+        return True
+    return False
+
 log = logging.getLogger("SESSION")
 
 
@@ -375,6 +395,30 @@ class Session:
             bytes(self.audio_buf), self.sample_rate,
             language=self.sticky_lang or "auto")
 
+    async def _retry_forced(self) -> str:
+        """One last-chance pass after the model produced no speakable answer:
+        same conversation, one blunt user-turn order to call the tool first."""
+        cmd = ("[PRIKAZ: Nerob plan. Okamžite zavolaj nástroj mcp__homey__* "
+               "pre aktuálny stav a odpovedz LEN JSON {\"reply\": \"...\", "
+               "\"followup\": false}. Po slovensky, ženské tvary.]"
+               if self.lang == "sk" else
+               "[ORDER: no plans. Call the matching mcp__homey__* tool now, "
+               "then answer with ONLY the JSON object.]")
+        try:
+            buf = ""
+            async for d in self.llm.stream_reply(
+                    self.history + [{"role": "user", "content": cmd}],
+                    lang=self.lang, conversation_id=self.conversation_id):
+                buf += d
+            reply, self.expects_reply = parse_llm_output(buf)
+            reply = strip_markdown(reply)
+            log.info("[%s] forced retry raw: %r", self.session_id, buf[:200])
+            if reply and not _reply_is_bad(reply, self.lang):
+                return reply
+        except Exception as e:
+            log.warning("[%s] forced retry failed: %s", self.session_id, e)
+        return ""
+
     async def _run_llm_tts(self, transcript: str) -> None:
         """Streaming pipeline: LLM streams -> sentence splitter -> TTS per
         sentence -> PCM frames to the device. First audio arrives after the
@@ -441,6 +485,7 @@ class Session:
             finally:
                 self._mark("llm")
                 result["buf"] = buf
+                result["json_seen"] = json_seen
                 if json_seen and not flushed:
                     await q.put(strip_markdown(pending).strip())
                 await q.put(_PIPE_SENTINEL)
@@ -469,8 +514,15 @@ class Session:
         log.info("LLM raw: %r", raw[:400])
         reply, self.expects_reply = parse_llm_output(raw)
         reply = strip_markdown(reply)
+        # Nothing streamed and what came back is unspammable (empty, a bare
+        # "# Checking…" announcement, or English into a Slovak turn): give
+        # the turn one forced retry demanding the tool call + JSON contract.
+        if not _played_any and _reply_is_bad(reply, self.lang):
+            fixed = await self._retry_forced()
+            reply = fixed or ""
         if not reply:
-            reply = "Sorry, I did not catch that."
+            reply = ("Prepáč, nepočula som to dobre." if self.lang == "sk"
+                     else "Sorry, I did not catch that.")
         self.reply_lang = "sk" if any(c in _SK_CHARS for c in reply) else self.lang
 
         # If nothing was streamed (empty/failed reply), speak the fallback
