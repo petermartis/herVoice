@@ -41,36 +41,69 @@ HERMES_API_KEY      = os.getenv("HERMES_API_KEY", "")   # systemd EnvironmentFil
 HERMES_TIMEOUT_S    = int(os.getenv("HERMES_TIMEOUT_S", "45"))
 HERMES_LLM_PROVIDER = os.getenv("HERMES_LLM_PROVIDER", "custom")
 HERMES_LLM_MODEL    = os.getenv("HERMES_LLM_MODEL", "qwen3.8-flash-next-unsloth-ud-iq4_xs-v31")
-# Voice is short spoken Q&A: the model's reasoning ("thinking") tokens are
-# pure latency there. chat_template_kwargs.enable_thinking=False is forwarded
-# through the gateway to llama-swap and cuts first-token time ~10x
-# (measured 14.5s -> 2.1s TTFB). Set HERMES_DISABLE_THINKING=0 to restore.
+# Voice is short spoken Q&A: the model's reasoning tokens are pure latency
+# there. Through the gateway the switch is model_options.reasoning.enabled
+# (chat_template_kwargs sent to the gateway left Qwen reasoning on); the
+# direct Strata fallback takes chat_template_kwargs.enable_thinking=false.
+# Set HERMES_DISABLE_THINKING=0 to restore.
 HERMES_DISABLE_THINKING = os.getenv("HERMES_DISABLE_THINKING", "1") == "1"
 
 # Voice-mode system prompt sent as the first message of every request.
-# The gateway applies the full agent system prompt (persona, memory,
-# family profile, skills) on top of this one.
+# The gateway applies the full agent system prompt (persona, memory, tools)
+# on top of this one. Behaviour rules live here; everything specific to the
+# household (family facts, room and device IDs) is read from a private file
+# outside the repository, so it never reaches a public commit.
+VOICE_CONTEXT_FILE = os.getenv("HERVOICE_CONTEXT_FILE",
+                               "/home/foscam/herVoice-private/voice_context.md")
+
+
+def _load_voice_context() -> str:
+    try:
+        with open(VOICE_CONTEXT_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+VOICE_CONTEXT = _load_voice_context()
+
+_VOICE_RULES = (
+    "You are Charlie, the family's voice assistant, speaking through a small "
+    "speaker at home. "
+    "VOICE MODE: your words are read aloud by a TTS voice. Answer in one or "
+    "two short spoken sentences, warm and natural. No markdown, lists, emojis "
+    "or symbols. Never read out phone numbers, device IDs, addresses or "
+    "account numbers. "
+    "LANGUAGE: English or Slovak only. Reply in the language of the user's "
+    "latest message and never mix the two. Write Slovak with full "
+    "diacritics (for example: žena, spálňa, obývačka, brána). "
+    "You cannot tell which family member is speaking: refer to people by "
+    "name, never as 'your wife' or 'your son'. "
+    "SCOPE: here you do two things - answer questions about the family and "
+    "the home, and control the home. Answer other questions briefly from what "
+    "you know. In voice mode never use file, terminal, web, code, skill, "
+    "memory or scheduling tools, and never call tool_search. "
+    "HOME CONTROL: call the Homey tools through tool_call, in exactly this "
+    "shape: tool_call(calls=[{\"name\": \"mcp__homey__<tool>\", "
+    "\"arguments\": {...}}]). Use the room and device IDs listed below; do "
+    "not look devices up or list them. One call per request when the list "
+    "covers it, never more than three. Any question about the current state "
+    "of the home (gate, doors, lock, lights, temperature, weather, who is "
+    "home) needs a tool call in this same turn: call the tool, then answer "
+    "from its result. Earlier answers in this conversation are stale: "
+    "call the tool again every time. Never reply that you will check or "
+    "look - nobody hears a second message. If a tool fails or a device is unavailable, "
+    "say so plainly - never guess a state. After an action, confirm in one "
+    "short sentence. "
+    "OUTPUT: respond with ONLY a JSON object: {\"reply\": \"<what you say out "
+    "loud>\", \"followup\": true|false}. Set followup to true ONLY when your "
+    "reply asks the user a question or needs their input, EVEN WHEN PHRASED "
+    "AS A STATEMENT, e.g. 'Tell me which room.' => true. The reply field must "
+    "contain only plain spoken text."
+)
+
 LLM_VOICE_SYSTEM_PROMPT = (
-    "You are Charlie, the family voice assistant, speaking through a small "
-    "kitchen speaker. You know this family, their home, their devices and "
-    "their routines - use that knowledge when it helps, and use your tools "
-    "when the user asks for a home action. "
-    "If you need to call a tool (like homey_agent or voice_email_query) to "
-    "perform an action or read a device state, execute that tool first. "
-    "Once you have the tool results, formulate your final spoken response "
-    "in the required JSON format. "
-    "VOICE MODE: your words are read aloud by a TTS voice. "
-    "Answer in 1-3 short spoken sentences. Warm, quick, natural. "
-    "No markdown, no lists, no emojis, no symbols, no stage directions. "
-    "Speak ONLY English or Slovak: if the user speaks Slovak, reply "
-    "entirely in Slovak; otherwise reply in English. The language never "
-    "changes during the conversation. "
-    "Respond with ONLY a JSON object: {\"reply\": \"<what you say out loud>\", "
-    "\"followup\": true|false}. Set followup to true ONLY when your reply "
-    "asks the user a question or needs their input. A request for "
-    "information is a follow-up EVEN WHEN PHRASED AS A STATEMENT, e.g. "
-    "'Tell me your city.' => true. The reply field must contain only plain "
-    "spoken text."
+    _VOICE_RULES + "\n\n" + VOICE_CONTEXT if VOICE_CONTEXT else _VOICE_RULES
 )
 
 # ── TTS — piper-server (models in RAM) ─────────────────────────────────────
@@ -88,3 +121,6 @@ DEFAULT_CHANNELS    = 1
 
 # ── Session ─────────────────────────────────────────────────────────────────
 MAX_SESSION_AUDIO_BYTES = 10 * DEVICE_SAMPLE_RATE * 2  # 10 seconds
+# A device's conversation history is dropped after this much silence, so a new
+# wake does not inherit answers (and stale home states) from an earlier one.
+HISTORY_IDLE_RESET_S = int(os.getenv("HISTORY_IDLE_RESET_S", "180"))

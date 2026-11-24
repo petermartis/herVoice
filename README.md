@@ -12,13 +12,14 @@ The production system supports **English and Slovak only**. The language chosen 
 | Wake word | ESP-SR WakeNet `wn9_sophia_tts`; tap is the manual trigger |
 | Endpointing | Raw-RMS VAD in firmware, before 10× STT upload gain |
 | Device transport | Framed TCP PCM, device → backend `192.168.1.35:8765` |
-| Speech recognition | faster-whisper `large-v3-turbo`, CPU int8, service on `127.0.0.1:15556` |
+| Speech recognition | faster-whisper `large-v3-turbo` on the GPU (`int8_float16`, automatic CPU fallback), service on port `15556` |
 | Agent | Hermes gateway on `192.168.1.100:8642` |
 | Voice LLM route | Explicit local `qwen3.8-flash-next-unsloth-ud-iq4_xs-v31` through provider `custom` |
 | Direct LLM fallback | Local Strata OpenAI-compatible endpoint on `127.0.0.1:8081` |
 | English speech | Kokoro `af_heart`, 24 kHz, resampled for the device |
 | Slovak speech | ElevenLabs multilingual TTS; optional Piper startup path when ElevenLabs is not configured |
-| Conversation behavior | Per-device in-memory history, sentence-streamed TTS, wake-free follow-ups |
+| Conversation behavior | Transcript held by the Hermes gateway per conversation, sentence-streamed TTS, wake-free follow-ups |
+| Household knowledge | Private context file outside the repository (`HERVOICE_CONTEXT_FILE`) |
 
 The active firmware wake word is **Sophia**, not Charlie. A custom Charlie model remains future work.
 
@@ -58,9 +59,9 @@ See [docs/architecture.md](docs/architecture.md) for the complete runtime design
 4. Raw-RMS VAD waits for speech, then sends amplified 16 kHz mono s16le audio in `PCM_UP` frames.
 5. After 600 ms of trailing silence, or at the 10-second cap, firmware sends `PCM_UP_END`.
 6. The bridge wraps audio as WAV and calls the STT service.
-7. The bridge normalizes the conversation language to English or Slovak and sends the turn to the Hermes gateway.
-8. Hermes runs Charlie with persona, memory, and allowed tools using local Qwen 3.8 Flash.
-9. The bridge parses Charlie's JSON reply, starts TTS as complete sentences become available, and streams `PCM_DOWN` frames.
+7. The bridge normalizes the conversation language to English or Slovak and sends the turn to the Hermes gateway under a per-conversation session id.
+8. Hermes runs Charlie with persona, memory, and allowed tools (including Homey home control) using local Qwen 3.8 Flash.
+9. The bridge parses Charlie's JSON reply, starts TTS as complete sentences become available (the last one as soon as the reply string closes), and streams `PCM_DOWN` frames.
 10. `REPLY_META` declares whether the assistant expects an answer; `PCM_DOWN_END` terminates playback.
 11. If a reply is expected, the device keeps the same socket and records the next turn without another wake word. Follow-ups are capped at five.
 
@@ -169,7 +170,7 @@ Implemented and deployed:
 - Kokoro English and ElevenLabs Slovak speech
 - Per-stage latency logging and manual E2E client
 
-Outstanding work and known defects are tracked explicitly in [docs/development.md](docs/development.md#known-issues-and-development-priorities). Important current items include STT client/server contract verification, true mute enforcement, custom Charlie wake-word deployment, protocol hardening, automated language/follow-up tests, and removal of temporary display diagnostics.
+Outstanding work and known defects are tracked explicitly in [docs/development.md](docs/development.md#known-issues-and-development-priorities). Important current items include true mute enforcement, custom Charlie wake-word deployment, protocol hardening, automated language/follow-up tests, and removal of temporary display diagnostics.
 
 ## Security
 

@@ -36,7 +36,7 @@ The checked-out deployment is `/home/foscam/herVoice`. Three system services spl
 | Service | Listener | Entry point | Responsibility |
 |---|---|---|---|
 | `hervoice-bridge` | `0.0.0.0:8765` | `backend/server.py` | Device sessions, history, STT/LLM/TTS orchestration, binary protocol |
-| `hervoice-stt` | `127.0.0.1:15556` | `backend/services/stt_server.py` | faster-whisper transcription |
+| `hervoice-stt` | `0.0.0.0:15556` | `backend/services/stt_server.py` | faster-whisper transcription (GPU, CPU fallback) |
 | `hervoice-tts` | `127.0.0.1:15555` | `backend/services/tts_server.py` | Kokoro, ElevenLabs, and optional Piper synthesis |
 
 The same host exposes local Qwen 3.8 Flash through the Strata OpenAI-compatible API on `127.0.0.1:8081`.
@@ -47,9 +47,12 @@ The bridge's primary LLM path is the Hermes OpenAI-compatible gateway on port `8
 
 - `provider: custom`
 - `model: qwen3.8-flash-next-unsloth-ud-iq4_xs-v31`
-- the voice conversation messages
+- the voice system prompt and the newest user message only
+- header `X-Hermes-Session-Id: voice-<device id>-<epoch>`
 - `stream: true`
-- Qwen thinking suppression via `chat_template_kwargs.enable_thinking=false`
+- Qwen thinking suppression via `model_options.reasoning.enabled=false` (the direct Strata fallback uses `chat_template_kwargs.enable_thinking=false`)
+
+The session id makes the gateway continue its own stored transcript, which includes tool calls and their results. The bridge must not resend earlier turns itself: a resent history holds only the spoken replies, and the model then copies that pattern and answers home-state questions without calling a tool.
 
 The gateway adds Charlie's persona, persistent memory, user/family profile, skills, and selected tools. Voice is therefore not an anonymous direct-model chatbot.
 
@@ -87,13 +90,13 @@ Current VAD constants are start RMS 1500, stop RMS 700, 600 ms trailing silence,
 
 ### STT and language normalization
 
-The STT service runs faster-whisper `large-v3-turbo` on CPU with int8 compute, 16 threads, `beam_size=1`, and `vad_filter=False`. Firmware already performs endpointing; a second server-side VAD can drop speech and is intentionally disabled.
+The STT service runs faster-whisper `large-v3-turbo` on the GPU with `int8_float16` compute (about 1.6 GB of VRAM, roughly 0.07 s per clip), `beam_size=1`, and `vad_filter=False`. If the model cannot load on the GPU, or a call fails there, the service reloads on CPU int8 with 16 threads (about 2.9 s per clip with language detection). Firmware already performs endpointing; a second server-side VAD can drop speech and is intentionally disabled.
 
 Language policy:
 
-1. The first turn is transcribed with automatic detection.
-2. `en` remains English and `sk` remains Slovak.
-3. Any other detected language is transcribed again with Slovak forced.
+1. The first turn uses automatic detection, which is a two-way decision made from one language-detection pass.
+2. The clip is English only when English is Whisper's first choice; anything else is Slovak. Comparing the `en` score with the `sk` score is wrong: short Slovak clips are often scored as Polish or Czech with Slovak near zero.
+3. The clip is decoded once, in the chosen language. The response includes `lang_probs` for diagnosis.
 4. Follow-up turns pass the established `en` or `sk` language directly to STT.
 5. Session logic treats exactly `en` as English and every other result as Slovak.
 
@@ -103,7 +106,13 @@ The language lock is scoped to the current TCP connection. Per-device conversati
 
 `backend/server.py` stores one history list per `device_id`. The bridge peeks at the first `SESSION_START` to select the list before constructing a session, so the first turn and all follow-ups share the same history.
 
-History is process-local and not durable. It is trimmed in place to preserve the system prompt plus the last 20 messages. A bridge restart clears it; Hermes itself may still contribute persistent user memory.
+This local history is used only by the direct Strata fallback. On the primary path the gateway holds the transcript under the conversation's session id. Assistant turns are stored locally in the same JSON form the model is asked to produce.
+
+The local history is process-local and trimmed in place to the system prompt plus the last 20 messages. After `HISTORY_IDLE_RESET_S` (default 180 s) without a turn from a device, its local history is cleared and a new gateway session id is issued, so a new wake does not inherit stale home states. A bridge restart also clears it; Hermes itself may still contribute persistent user memory.
+
+### Household context
+
+`backend/config.py` holds only behaviour rules. Family facts, room and device identifiers, and tool recipes are read at startup from a private file outside the repository (`HERVOICE_CONTEXT_FILE`, default `/home/foscam/herVoice-private/voice_context.md`, mode `0600`) and appended to the voice system prompt. The repository is public: never put names or device identifiers in tracked files. The bridge startup line reports the context size; zero means the file was not found and Charlie has no home knowledge.
 
 ### LLM output contract
 
@@ -126,7 +135,7 @@ The parser tolerates code fences, extracts the first JSON object when necessary,
 
 ### Sentence-streamed TTS
 
-The bridge incrementally extracts the `reply` field from partial JSON and divides it at sentence boundaries. A producer/consumer pipeline synthesizes complete sentences while the LLM continues generating later text. This reduces time to first audio.
+The bridge incrementally extracts the `reply` field from partial JSON and divides it at sentence boundaries. A producer/consumer pipeline synthesizes complete sentences while the LLM continues generating later text. The final sentence is queued the moment the reply string's closing quote arrives, not when the stream ends, because the gateway keeps the stream open for about a second after the text is complete. Text outside the JSON reply is never spoken mid-stream. This reduces time to first audio.
 
 The TTS client sends `{text, lang}` to `127.0.0.1:15555/synthesize`, reads a WAV response, resamples it to the device sample rate with `scipy.signal.resample_poly`, and sends 50 ms `PCM_DOWN` chunks.
 
@@ -228,6 +237,7 @@ The system unit loads `/home/foscam/herVoice/.env`. Values must never be committ
 - `HERMES_API_ENABLED`, `HERMES_API_URL`, `HERMES_API_KEY`
 - `HERMES_TIMEOUT_S`, `HERMES_LLM_PROVIDER`, `HERMES_LLM_MODEL`
 - `HERMES_DISABLE_THINKING`
+- `HERVOICE_CONTEXT_FILE`, `HISTORY_IDLE_RESET_S`
 - `PIPER_SERVER_URL`
 
 The TTS service additionally reads `ELEVENLABS_API_KEY`, `ELEVENLABS_SK_VOICE_ID`, `ELEVENLABS_MODEL`, and `PIPER_VOICE_PATH`. Verify the installed TTS systemd unit actually loads the protected environment file; the checked-in unit currently does not declare it.
@@ -248,13 +258,13 @@ The device protocol has no encryption or peer authentication. It assumes a trust
 
 At commit `e8848ff`, developers should account for these concrete gaps:
 
-1. `backend/stt.py` constructs a multipart request, while `stt_server.py` documents and implements the request body as audio with `language` and `sample_rate` query parameters. Verify and align this contract before relying on a clean deployment.
+1. The STT service has no automated contract test; it accepts both the bridge's multipart form and a raw audio body.
 2. The checked-in TTS unit does not load the root `.env`, although ElevenLabs configuration normally lives there.
 3. Piper is not an effective runtime fallback after an already-configured ElevenLabs engine fails.
 4. Slovak statement-form follow-up questions without a question mark may not trigger the heuristic when the model's flag is wrong.
 5. Protocol version, declared format, exact session payload length, maximum incoming frame size, and PCM even-byte length are not comprehensively validated.
 6. The manual E2E client skips `REPLY_META` and cannot exercise a second follow-up turn.
 7. Touch mute is not functionally enforced.
-8. Conversation history is process-local rather than durable.
+8. The bridge's fallback history is process-local; the primary transcript lives in the gateway.
 
 See [development.md](development.md) for verification procedures and prioritized development work.

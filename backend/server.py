@@ -7,6 +7,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from typing import Optional
 
 import config
@@ -34,6 +35,8 @@ class HerVoiceServer:
         self.tts = PiperTTS()
         # Per-device conversation history keyed by device_id
         self._histories: dict[int, list] = {}
+        self._last_turn: dict[int, float] = {}
+        self._conversation: dict[int, str] = {}
 
     async def startup(self) -> None:
         log.info("Loading STT model...")
@@ -45,7 +48,20 @@ class HerVoiceServer:
             self._histories[device_id] = [
                 {"role": "system", "content": config.LLM_SYSTEM_PROMPT}
             ]
-        return self._histories[device_id]
+        history = self._histories[device_id]
+        last = self._last_turn.get(device_id)
+        if last is not None and time.monotonic() - last > config.HISTORY_IDLE_RESET_S:
+            # In place: sessions may still hold a reference to this list.
+            del history[1:]
+            self._conversation.pop(device_id, None)
+        return history
+
+    def _conversation_id(self, device_id: int) -> str:
+        """Gateway session id for the device's current conversation; a new
+        one starts whenever the history was reset."""
+        if device_id not in self._conversation:
+            self._conversation[device_id] = f"voice-{device_id:08x}-{int(time.time())}"
+        return self._conversation[device_id]
 
     async def handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
@@ -74,12 +90,15 @@ class HerVoiceServer:
                     session = Session(reader, writer, self.stt, self.llm,
                                       self.tts, history,
                                       first_frame=(ftype, payload),
-                                      sticky_lang=convo_lang)
+                                      sticky_lang=convo_lang,
+                                      conversation_id=self._conversation_id(device_id))
                 else:
                     session = Session(reader, writer, self.stt, self.llm,
                                       self.tts, history,
-                                      sticky_lang=convo_lang)
+                                      sticky_lang=convo_lang,
+                                      conversation_id=self._conversation_id(device_id))
                 await session.run()
+                self._last_turn[device_id] = time.monotonic()
                 if session.lang_confirmed:
                     convo_lang = session.reply_lang or session.lang
             except (ConnectionResetError, asyncio.IncompleteReadError,

@@ -93,32 +93,43 @@ _SENT_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 _RE_REPLY_KEY = re.compile(r'"reply"\s*:\s*"')
 
 
-def _iter_reply_text(buf: str) -> str:
-    """The spoken reply text visible in a (possibly partial) LLM output.
+def _reply_progress(buf: str) -> tuple[str, bool, bool]:
+    """(spoken text so far, JSON contract seen, reply string closed) for a
+    possibly partial LLM output.
 
-    Handles the JSON contract incrementally: everything between the
-    opening quote of "reply" and the first unescaped closing quote.
-    Plain-text fallback (model ignored JSON): the whole buffer, as long
-    as no JSON brace has appeared yet.
+    The reply is everything between the opening quote of "reply" and the
+    first unescaped closing quote. `closed` turns True the moment that
+    closing quote arrives, which is when the last sentence can be spoken -
+    the stream itself stays open for another second or more.
     """
     m = _RE_REPLY_KEY.search(buf)
-    if m:
-        rest = buf[m.end():]
-        i = 0
-        while i < len(rest):
-            if rest[i] == "\\":
-                i += 2
-                continue
-            if rest[i] == '"':
-                rest = rest[:i]
-                break
-            i += 1
-        # A trailing lone backslash is an incomplete escape split across
-        # deltas - do not surface it yet (it would otherwise re-escape the
-        # next character retroactively).
-        if rest.endswith("\\"):
-            rest = rest[:-1]
-        return rest
+    if not m:
+        return "", False, False
+    rest = buf[m.end():]
+    closed = False
+    i = 0
+    while i < len(rest):
+        if rest[i] == "\\":
+            i += 2
+            continue
+        if rest[i] == '"':
+            rest = rest[:i]
+            closed = True
+            break
+        i += 1
+    # A trailing lone backslash is an incomplete escape split across
+    # deltas - do not surface it yet (it would otherwise re-escape the
+    # next character retroactively).
+    if rest.endswith("\\"):
+        rest = rest[:-1]
+    return rest, True, closed
+
+
+def _iter_reply_text(buf: str) -> str:
+    """The spoken reply text visible in a (possibly partial) LLM output."""
+    text, is_json, _ = _reply_progress(buf)
+    if is_json:
+        return text
     if "{" not in buf:
         return buf.strip()
     return ""
@@ -188,7 +199,8 @@ class Session:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                  stt, llm, tts, conversation_history: Optional[list] = None,
                  first_frame: Optional[tuple] = None,
-                 sticky_lang: Optional[str] = None):
+                 sticky_lang: Optional[str] = None,
+                 conversation_id: Optional[str] = None):
         self.reader  = reader
         self.writer  = writer
         self.stt     = stt
@@ -199,6 +211,8 @@ class Session:
         # device_id before picking the per-device history) - replay it
         # in _handle_session_start if provided.
         self._first_frame = first_frame
+        # Gateway session that holds this conversation's transcript.
+        self.conversation_id = conversation_id
 
         self.expects_reply = False
         self.state       = SessionState.INIT
@@ -384,17 +398,28 @@ class Session:
             visible = ""
             pending = ""
             first_delta = False
+            json_seen = False
+            flushed = False
             try:
                 async for delta in self.llm.stream_reply(
-                        self.history, lang=self.lang):
+                        self.history, lang=self.lang,
+                        conversation_id=self.conversation_id):
                     if not first_delta:
                         self._mark("llm_first")
                         first_delta = True
                     buf += delta
-                    v = _iter_reply_text(buf)
-                    if len(v) > len(visible):
-                        pending += v[len(visible):]
-                        visible = v
+                    text, is_json, closed = _reply_progress(buf)
+                    if not is_json:
+                        # Plain text, or a preamble the model wrote before
+                        # a tool call ("Checking the gate..."). Never speak
+                        # it mid-stream: if the JSON reply follows, the
+                        # preamble is dropped; if it never does, the whole
+                        # text is spoken once after the stream ends.
+                        continue
+                    json_seen = True
+                    if len(text) > len(visible):
+                        pending += text[len(visible):]
+                        visible = text
                         while True:
                             m = _SENT_BOUNDARY.search(pending)
                             if not m:
@@ -403,12 +428,21 @@ class Session:
                             pending = pending[m.end():]
                             if sent:
                                 await q.put(sent)
+                    if closed and not flushed:
+                        # The reply string is complete: speak its last
+                        # sentence now instead of waiting for the stream
+                        # to close (the gateway keeps it open ~1 s more).
+                        flushed = True
+                        self._mark("reply_done")
+                        tail = strip_markdown(pending).strip()
+                        pending = ""
+                        if tail:
+                            await q.put(tail)
             finally:
                 self._mark("llm")
                 result["buf"] = buf
-                # Flush the trailing fragment (last sentence may lack the
-                # boundary whitespace before the stream ends).
-                await q.put(strip_markdown(pending).strip())
+                if json_seen and not flushed:
+                    await q.put(strip_markdown(pending).strip())
                 await q.put(_PIPE_SENTINEL)
 
         async def consume():
@@ -450,7 +484,11 @@ class Session:
                 _played_any = True
                 await send_frame(self.writer, FRAME_PCM_DOWN, chunk)
 
-        self.history.append({"role": "assistant", "content": reply})
+        # Store the turn in the same JSON form the model is asked to produce.
+        # Plain-text history taught the model to answer later turns in plain
+        # text and without calling its tools.
+        self.history.append({"role": "assistant", "content": json.dumps(
+            {"reply": reply, "followup": bool(self.expects_reply)}, ensure_ascii=False)})
         # Keep history bounded (system prompt + last 20 messages).
         # Truncate IN PLACE: self.history may be the shared per-device
         # list that handle_client() still holds a reference to.

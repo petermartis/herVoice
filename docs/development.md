@@ -187,6 +187,8 @@ HERMES_API_KEY=<protected>
 HERMES_LLM_PROVIDER=custom
 HERMES_LLM_MODEL=qwen3.8-flash-next-unsloth-ud-iq4_xs-v31
 HERMES_DISABLE_THINKING=1
+HERVOICE_CONTEXT_FILE=/home/foscam/herVoice-private/voice_context.md
+HISTORY_IDLE_RESET_S=180
 
 LLM_SERVER_URL=http://127.0.0.1:8081
 LLM_MODEL=qwen3.8-flash-next-unsloth-ud-iq4_xs-v31
@@ -218,23 +220,25 @@ systemctl is-active hervoice-stt hervoice-tts hervoice-bridge
 systemctl cat hervoice-tts
 ```
 
+The installed STT unit runs on the GPU through the drop-in `deploy/hervoice-stt-gpu.conf`, installed as `/etc/systemd/system/hervoice-stt.service.d/zz-gpu.conf`. It needs cuDNN 9 on `LD_LIBRARY_PATH` (here `/home/foscam/hervoice-gpu-libs`) and cuBLAS from the system CUDA install. Remove the drop-in and run `daemon-reload` to return to CPU. The model shares the GPU with Qwen; measure free VRAM with `nvidia-smi` before adding anything else to it.
+
 Verify the installed unit, not just the repository template. In particular, confirm that TTS has an `EnvironmentFile` entry for the root `.env` before expecting ElevenLabs variables to exist.
 
 ## Health and smoke checks
 
 ### STT
 
-The intended STT service contract is:
+The STT service contract is:
 
 ```text
 POST http://127.0.0.1:15556/transcribe?language=auto&sample_rate=16000
-Content-Type: application/octet-stream
-Body: complete WAV bytes or raw s16le PCM
+Body: complete WAV bytes or raw s16le PCM,
+      or a multipart form with fields file and language (what backend/stt.py sends)
 ```
 
-`GET /health` returns a small status response. Requests under 1000 bytes are rejected.
+`language` is `auto`, `en` or `sk`. `auto` returns English only when English is Whisper's first choice, otherwise Slovak, and adds `lang_probs` to the response.
 
-**Current defect:** `backend/stt.py` sends multipart form data while `stt_server.py` reads the complete body as audio and reads language from the query string. Align the two implementations and add an integration test before treating this contract as stable.
+`GET /health` returns the status and the device in use (`cuda` or `cpu`). Requests under 1000 bytes are rejected.
 
 ### TTS
 
@@ -254,7 +258,7 @@ Strata health is available on the local model service. The expected loaded model
 
 ### Bridge
 
-Confirm port 8765 is listening and the startup journal reports the Hermes agent API backend. A startup line naming direct local LLM means the Hermes key/configuration was unavailable.
+Confirm port 8765 is listening and the startup journal reports the Hermes agent API backend and a non-zero household context size. A startup line naming direct local LLM means the Hermes key/configuration was unavailable.
 
 ## Manual E2E client
 
@@ -279,12 +283,14 @@ Read bridge journal `LATENCY` lines. Diagnose the longest stage rather than retu
 | Field/stage | Likely subsystem |
 |---|---|
 | audio upload | device VAD, trailing silence, network upload |
-| STT | faster-whisper service/model/CPU |
-| LLM first content | Hermes gateway, model queue, tool loop, prompt size |
+| STT | faster-whisper service/model; about 0.07 s on the GPU, seconds if it fell back to CPU |
+| LLM first content | Hermes gateway (its SQLite commit setting, see below), model queue, tool loop, prompt size |
 | LLM total | response length and model generation |
 | TTS first audio | sentence boundary and selected TTS engine |
 | tail | playback ring and DMA drain |
 | first-audio time | end-to-end user-perceived latency |
+
+Reference figures from bridge-injected clips on 2026-11-24: knowledge questions 0.7-1.3 s to first audio, home questions with one tool call 1.8-2.8 s. The first turn after a pause or a gateway restart is several seconds slower. These depend on the Hermes NAS running `database.synchronous: NORMAL`; at the SQLite default each turn spends an extra 1-2 s in database commits on that host's spinning disks.
 
 The Speaking UI state is entered only when the first `PCM_DOWN` arrives; a visual state alone is not proof that useful audio was queued or played.
 
@@ -296,18 +302,18 @@ Production-microphone collection mode is driven by `/tmp/hervoice_record_state.j
 
 ### Correctness and reliability
 
-1. **Align STT client/server HTTP contracts.** Replace multipart or change the service consistently; cover WAV and raw PCM.
+1. **Keep the first turn after a pause warm.** It is several seconds slower than later turns.
 2. **Load TTS secrets in the checked-in unit.** Add and verify `EnvironmentFile=-/home/foscam/herVoice/.env`.
 3. **Implement a real Slovak TTS failure fallback** or explicitly document speech loss when ElevenLabs is unavailable.
 4. **Harden frame validation.** Bound payload lengths; validate protocol version, exact session payload length, declared format, and even PCM byte counts; always consume or reject surplus bytes safely.
 5. **Make mute functional.** Apply the touch mute state to playback/amplifier behavior and define whether capture continues.
-6. **Persist or deliberately reset conversation state.** Current bridge history is lost on restart and language is connection-scoped.
+6. **Language is connection-scoped.** Conversation state resets deliberately after 180 s of silence; the language lock still ends with the TCP connection.
 
 ### Testing
 
-1. Add STT contract integration tests.
+1. Add STT contract integration tests (raw body, multipart, language decision).
 2. Add English/Slovak normalization and language-lock tests.
-3. Assert voice requests use `provider=custom` and Qwen 3.8 Flash.
+3. Assert voice requests use `provider=custom`, Qwen 3.8 Flash and a conversation session id, and carry no resent history.
 4. Exercise `REPLY_META`, a second turn on the same socket, silence timeout, and five-turn cap.
 5. Validate generated WAV format and signal sanity.
 6. Add cancellation and truncated/disconnected-socket tests.

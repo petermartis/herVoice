@@ -31,7 +31,7 @@ def _voice_payload(messages: list[dict]) -> dict:
         "stream": True,
     }
     if config.HERMES_DISABLE_THINKING:
-        p["chat_template_kwargs"] = {"enable_thinking": False}
+        p["model_options"] = {"reasoning": {"enabled": False}}
     return p
 
 
@@ -82,6 +82,9 @@ class LlamaLLM:
             "temperature": config.LLM_TEMPERATURE,
             "stream":      False,
         }
+        if config.LLM_NO_THINK:
+            # Strata ignores the /no_think tag; this is the switch it honours.
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         url = f"{config.LLM_SERVER_URL.rstrip('/')}/v1/chat/completions"
         session = self._get_session()
@@ -107,7 +110,8 @@ class LlamaLLM:
             log.exception("LLM response parse error: %s", e)
             return "Sorry, I received an unexpected response."
 
-    async def stream_reply(self, history: list[dict], lang: str = "sk"):
+    async def stream_reply(self, history: list[dict], lang: str = "sk",
+                           conversation_id: Optional[str] = None):
         """Non-streaming backend: yield the full reply in one delta."""
         reply = await self.complete(history, lang)
         if reply:
@@ -210,12 +214,17 @@ class HermesLLM:
             log.warning("Hermes LLM failed (%s) - falling back to local LLM", e)
             return await self._fallback.complete(history, lang, on_first_chunk)
 
-    async def stream(self, messages: list[dict]):
+    async def stream(self, messages: list[dict], conversation_id: Optional[str] = None):
         """Yield raw content deltas from the Hermes SSE stream."""
         payload = _voice_payload(messages)
         session = self._get_session()
+        # With a session id the gateway continues its own stored transcript,
+        # which includes the tool calls and their results. A history resent
+        # by us holds only the spoken replies, and the model then copies
+        # that pattern: it answers home questions without calling a tool.
+        headers = {"X-Hermes-Session-Id": conversation_id} if conversation_id else None
         async with session.post(
-            config.HERMES_API_URL, json=payload,
+            config.HERMES_API_URL, json=payload, headers=headers,
             timeout=aiohttp.ClientTimeout(
                 total=config.HERMES_TIMEOUT_S + 75, sock_read=30),
         ) as resp:
@@ -239,7 +248,8 @@ class HermesLLM:
                     if chunk:
                         yield chunk
 
-    async def stream_reply(self, history: list[dict], lang: str = "sk"):
+    async def stream_reply(self, history: list[dict], lang: str = "sk",
+                           conversation_id: Optional[str] = None):
         """Stream the voice reply; fall back to local LLM on failure.
         Falls back only if nothing has been emitted yet (a mid-stream
         failure would otherwise speak the reply twice)."""
@@ -258,9 +268,12 @@ class HermesLLM:
                 "role": "system",
                 "content": config.LLM_VOICE_SYSTEM_PROMPT,
             })
+        if conversation_id:
+            # The gateway already holds the earlier turns of this conversation.
+            messages = [messages[0]] + [m for m in messages[-1:] if m.get("role") == "user"]
         emitted = False
         try:
-            async for d in self.stream(messages):
+            async for d in self.stream(messages, conversation_id):
                 emitted = True
                 yield d
         except Exception as e:
@@ -280,7 +293,9 @@ class HermesLLM:
 def make_llm():
     """Pick the LLM backend: Hermes agent when configured, else local."""
     if config.HERMES_API_ENABLED and config.HERMES_API_KEY:
-        log.info("LLM backend: Hermes agent API (%s)", config.HERMES_API_URL)
+        log.info("LLM backend: Hermes agent API (%s) provider=%s model=%s household context=%d chars",
+                 config.HERMES_API_URL, config.HERMES_LLM_PROVIDER,
+                 config.HERMES_LLM_MODEL, len(config.VOICE_CONTEXT))
         return HermesLLM()
     log.info("LLM backend: local llama-server (%s)", config.LLM_SERVER_URL)
     return LlamaLLM()
