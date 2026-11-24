@@ -224,7 +224,7 @@ After an esptool hard reset, CST816S can remain unresponsive until USB power is 
 
 ### Firmware
 
-Wi-Fi credentials live only in gitignored `firmware/sdkconfig`. Important Kconfig values include server host/port, sample rate, device ID, and wake model. The active detector uses an explicit 0.4 WakeNet threshold; the `CONFIG_HERVOICE_WAKE_THRESHOLD` setting is not wired into the current detector.
+Wi-Fi credentials live only in gitignored `firmware/sdkconfig`. Important Kconfig values include server host/port, sample rate, device ID, and wake model. The active detector keeps the WakeNet model's own calibrated threshold (0.647 for `wn9_sophia_tts`); forcing the engine minimum of 0.4 let ambient sound open sessions several times an hour. The `CONFIG_HERVOICE_WAKE_THRESHOLD` setting is not wired into the current detector.
 
 ### Bridge environment
 

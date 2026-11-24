@@ -173,11 +173,12 @@ esp_err_t wake_init(void)
         s_model = NULL;
         return ESP_ERR_NO_MEM;
     }
-    float old_thr = s_wakenet->get_det_threshold(s_model, 1);
-    s_wakenet->set_det_threshold(s_model, 0.4f, 1); /* max sensitivity (range 0.4-0.9999, lower = more sensitive) */
-    float new_thr = s_wakenet->get_det_threshold(s_model, 1);
-    ESP_LOGI(TAG, "WakeNet: chunk=%d (aligned), mode=DET_MODE_95, threshold word1 %f -> %f",
-             s_chunk_size, (double)old_thr, (double)new_thr);
+    /* Keep the model's calibrated threshold. Forcing 0.4 (the most sensitive
+     * value the engine accepts) let ambient sound open sessions several
+     * times an hour. Range is 0.4-0.9999; higher = fewer false wakes. */
+    float thr = s_wakenet->get_det_threshold(s_model, 1);
+    ESP_LOGI(TAG, "WakeNet: chunk=%d (aligned), mode=DET_MODE_95, threshold word1 %f",
+             s_chunk_size, (double)thr);
     /* DIAGNOSTIC: what does the model actually expect? */
     int   ch_num   = s_wakenet->get_channel_num(s_model);
     int   smp_rate = s_wakenet->get_samp_rate(s_model);
