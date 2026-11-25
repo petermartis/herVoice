@@ -14,6 +14,8 @@ extern "C" {
 #define FRAME_PCM_DOWN        0x10
 #define FRAME_PCM_DOWN_END    0x11
 #define FRAME_REPLY_META      0x12  /* 1-byte payload: 1 = LLM expects user reply */
+#define FRAME_TIMER_SET       0x13  /* 4-byte LE u32: countdown seconds */
+#define FRAME_TIMER_CANCEL    0x14  /* no payload: clear countdown */
 #define FRAME_ERROR           0x20
 
 /* Protocol version */

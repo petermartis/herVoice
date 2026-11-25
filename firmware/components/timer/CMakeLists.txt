@@ -1,0 +1,5 @@
+idf_component_register(
+    SRCS "timer.c"
+    INCLUDE_DIRS "include"
+    REQUIRES ui audio esp_timer freertos
+)

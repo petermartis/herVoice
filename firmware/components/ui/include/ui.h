@@ -39,3 +39,10 @@ void ui_show_volume(int vol);
 #ifdef __cplusplus
 }
 #endif
+
+/* Kitchen-timer countdown overlay, shown above the state label (bottom of
+ * the screen) in every state. Thread-safe: just stores the value; the LVGL
+ * task renders it. Pseudo values: UI_TIMER_HIDE, UI_TIMER_DONE. */
+#define UI_TIMER_HIDE (-1)
+#define UI_TIMER_DONE (-2)
+void ui_timer_display(int seconds);

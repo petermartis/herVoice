@@ -268,6 +268,8 @@ static const st77916_lcd_init_cmd_t s_vendor_init[] = {
 static esp_lcd_panel_io_handle_t s_io_handle   = NULL;
 static esp_lcd_panel_handle_t  s_panel         = NULL;
 static lv_disp_t              *s_disp          = NULL;
+static volatile int            s_timer_disp    = UI_TIMER_HIDE;
+static lv_obj_t               *s_timer_label   = NULL;
 static lv_obj_t               *s_screen        = NULL;
 static lv_obj_t               *s_state_label   = NULL;
 static lv_obj_t               *s_pulse_circle  = NULL;
@@ -456,6 +458,28 @@ static void lvgl_task(void *arg)
             if (s_vol_flash_until && esp_timer_get_time() >= s_vol_flash_until) {
                 s_vol_flash_until = 0;
                 apply_state(s_current_state);  /* flash expired: restore text */
+            }
+
+            /* Kitchen timer countdown overlay (see timer.c) */
+            {
+                static int s_last_timer_disp = UI_TIMER_HIDE;
+                if (s_timer_disp != s_last_timer_disp && s_timer_label) {
+                    s_last_timer_disp = s_timer_disp;
+                    if (s_timer_disp == UI_TIMER_HIDE) {
+                        lv_obj_add_flag(s_timer_label, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        char tb[32];
+                        if (s_timer_disp == UI_TIMER_DONE) {
+                            snprintf(tb, sizeof(tb), "Timer done!");
+                        } else {
+                            snprintf(tb, sizeof(tb), "%d:%02d left",
+                                     s_timer_disp / 60, s_timer_disp % 60);
+                        }
+                        lv_label_set_text(s_timer_label, tb);
+                        lv_obj_clear_flag(s_timer_label, LV_OBJ_FLAG_HIDDEN);
+                        lv_obj_move_foreground(s_timer_label);
+                    }
+                }
             }
             
             /* Real-time speech cadence pulsing circle */
@@ -651,6 +675,14 @@ esp_err_t ui_init(void)
     lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_obj_align(s_state_label, LV_ALIGN_CENTER, 0, 0);
 
+    /* Kitchen-timer countdown line (hidden until a timer is armed) */
+    s_timer_label = lv_label_create(s_screen);
+    lv_label_set_text(s_timer_label, "");
+    lv_obj_set_style_text_font(s_timer_label, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_timer_label, lv_color_make(255, 230, 0), LV_PART_MAIN);
+    lv_obj_align(s_timer_label, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_add_flag(s_timer_label, LV_OBJ_FLAG_HIDDEN);
+
     /* Render IDLE state immediately */
     apply_state(UI_STATE_IDLE);
 
@@ -682,6 +714,11 @@ void ui_set_state(ui_state_t state)
 ui_state_t ui_get_state(void)
 {
     return s_current_state;
+}
+
+void ui_timer_display(int seconds)
+{
+    s_timer_disp = seconds;   /* volatile; LVGL task renders */
 }
 
 void ui_show_volume(int vol)

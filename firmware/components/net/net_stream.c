@@ -15,6 +15,7 @@
 #include "wake.h"
 #include "net.h"
 #include "ui.h"
+#include "timer.h"
 #include "protocol.h"
 #include "sdkconfig.h"
 
@@ -351,6 +352,17 @@ static void run_session(int sock, bool is_followup)
                 s_expects_reply = (meta == 1);
             }
             ESP_LOGI(TAG, "Reply meta: expects_reply=%d", (int)s_expects_reply);
+        } else if (hdr.type == FRAME_TIMER_SET) {
+            uint32_t secs = 0;
+            if (payload_len >= 4 && proto_recv_exact(sock, (uint8_t *)&secs, 4) == ESP_OK) {
+                if (payload_len > 4) { /* skip anything extra */
+                    uint8_t d;
+                    for (uint32_t i = 4; i < payload_len; i++) proto_recv_exact(sock, &d, 1);
+                }
+                timer_start((int)secs);
+            }
+        } else if (hdr.type == FRAME_TIMER_CANCEL) {
+            timer_cancel();
         } else if (hdr.type == FRAME_PCM_DOWN_END) {
             ESP_LOGI(TAG, "Session complete (PCM-DOWN End)");
             ESP_LOGI(TAG, "RX audio total: %lu samples min=%ld max=%ld", (unsigned long)s_rx_samples, (long)s_rx_min, (long)s_rx_max);
