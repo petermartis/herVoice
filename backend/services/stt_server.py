@@ -109,7 +109,7 @@ class STTService:
         return data
 
     @staticmethod
-    def _run(model: WhisperModel, audio_f32: np.ndarray, language: str) -> tuple[str, str, dict, float]:
+    def _run(model: WhisperModel, audio_f32: np.ndarray, language: str) -> tuple[str, str, dict, float, float, float]:
         probs: dict = {}
         if language not in LANGS:
             _, _, all_probs = model.detect_language(audio_f32)
@@ -127,8 +127,20 @@ class STTService:
             audio_f32, language=language, beam_size=5, vad_filter=False,
             condition_on_previous_text=False, repetition_penalty=1.15,
             initial_prompt=_DOMAIN_PROMPTS.get(language))
-        text = " ".join(s.text.strip() for s in segments).strip()
-        return text, language, probs, info.duration
+        segs = list(segments)
+        text = " ".join(s.text.strip() for s in segs).strip()
+        confidence = 0.0
+        if segs:
+            confidence = sum(s.avg_logprob for s in segs) / len(segs)
+            # Prompt-echo hallucinations: on long ambient/no-speech clips
+            # Whisper recites its initial_prompt verbatim (the exact prompt
+            # weather question "answered" twice from 9-10 s empty clips).
+            # Real speech, even noisy, keeps avg_logprob well above -0.9.
+            if text and (confidence < -0.9 or info.no_speech_prob > 0.7):
+                log.warning("hallucination rejected (logprob=%.2f no_speech=%.2f): %r",
+                            confidence, info.no_speech_prob, text[:70])
+                text = ""
+        return text, language, probs, info.duration, round(confidence, 3), round(float(info.no_speech_prob), 3)
 
     def transcribe(self, audio: bytes, language: str | None, sample_rate: int = SAMPLE_RATE) -> dict:
         audio_f32 = self._to_mono_f32(audio, sample_rate)
@@ -137,7 +149,7 @@ class STTService:
         used = self.device
         with self._lock:
             try:
-                text, lang, probs, duration = self._run(self.model, audio_f32, language)
+                text, lang, probs, duration, confidence, no_speech = self._run(self.model, audio_f32, language)
             except Exception as e:
                 if self.device == "cpu":
                     raise
@@ -145,12 +157,14 @@ class STTService:
                 log.error("GPU transcribe failed (%s) - retrying on CPU", e)
                 if self._cpu_model is None:
                     self._cpu_model = self._load("cpu", "int8")
-                text, lang, probs, duration = self._run(self._cpu_model, audio_f32, language)
+                text, lang, probs, duration, confidence, no_speech = self._run(self._cpu_model, audio_f32, language)
                 used = "cpu"
         return {
             "text": text,
             "language": lang,
             "duration": round(duration, 2),
+            "confidence": confidence,
+            "no_speech_prob": no_speech,
             "seconds": round(time.perf_counter() - t0, 3),
             "lang_probs": probs,
             "device": used,
