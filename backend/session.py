@@ -17,9 +17,11 @@ from typing import Optional
 from protocol import (
     recv_frame, send_frame, send_error, parse_session_start,
     FRAME_SESSION_START, FRAME_PCM_UP, FRAME_PCM_UP_END,
-    FRAME_PCM_DOWN, FRAME_PCM_DOWN_END, FRAME_REPLY_META
+    FRAME_PCM_DOWN, FRAME_PCM_DOWN_END, FRAME_REPLY_META,
+    FRAME_TIMER_SET, FRAME_TIMER_CANCEL
 )
 import config
+import timer
 
 _SK_CHARS = frozenset("áčďéíľňôšťúýžÁČĎÉÍĽŇÔŠŤÚÝŽ")
 
@@ -329,6 +331,17 @@ class Session:
                 return
             self.lang_confirmed = True
 
+            # Kitchen timer: deterministic intent fast-path (no LLM round
+            # trip). The device owns the countdown/beep; we phrase the
+            # confirmation and keep a mirror for status questions.
+            tcmd = timer.parse_timer(transcript)
+            if tcmd is not None:
+                await self._run_timer(tcmd[0], tcmd[1], transcript)
+                self._log_latency()
+                log.info("[%s] Timer turn (%s) done", self.session_id, tcmd[0])
+                self.state = SessionState.DONE
+                return
+
             await self._run_llm_tts(transcript)
             t_tts = time.perf_counter()
             self._log_latency()
@@ -352,6 +365,60 @@ class Session:
                 await send_error(self.writer, str(e))
             except Exception:
                 pass
+
+    async def _run_timer(self, action: str, seconds: int, transcript: str) -> None:
+        """Kitchen-timer turn: canned reply, TTS straight to the device, and
+        a control frame so the device runs the countdown and end-beep itself."""
+        self.state = SessionState.TTS
+        sk = self.lang == "sk"
+        if action == "set":
+            timer.arm(self.device_id, seconds)
+            dur = timer.fmt_sk(seconds) if sk else timer.fmt_en(seconds)
+            reply = (f"Časovač nastavený na {dur}. Ozvem sa, keď vyprší."
+                     if sk else
+                     f"Timer set for {dur}. I'll beep when it's up.")
+        elif action == "cancel":
+            had = timer.cancel(self.device_id)
+            reply = ("Zrušila som časovač." if had else
+                     ("Aktívny časovač teraz nemám." if sk else
+                      "I don't have an active timer right now."))
+            if not sk and had:
+                reply = "Timer cancelled."
+        else:  # status
+            rem = timer.remaining(self.device_id)
+            if rem > 0:
+                reply = (f"Na časovači ostáva {timer.fmt_sk(rem)}." if sk else
+                         f"{timer.fmt_en(rem)} left on the timer.")
+            else:
+                reply = ("Aktívny časovač teraz nemám." if sk else
+                         "There's no active timer right now.")
+        log.info("[%s] Timer %s %ss -> %r", self.session_id, action, seconds, reply)
+        self.reply_lang = self.lang
+        self.expects_reply = False
+
+        if not self.history or self.history[0].get("role") != "system":
+            self.history.insert(0, {"role": "system", "content": config.LLM_SYSTEM_PROMPT})
+        self.history.append({"role": "user", "content": transcript})
+        self._mark("llm")
+        async for chunk in self.tts.synthesize(
+                reply, lang=self.lang, output_sample_rate=self.sample_rate):
+            self._mark("tts_first")
+            await send_frame(self.writer, FRAME_PCM_DOWN, chunk)
+
+        self.history.append({"role": "assistant", "content": json.dumps(
+            {"reply": reply, "followup": False}, ensure_ascii=False)})
+        if len(self.history) > 21:
+            del self.history[1:-20]
+
+        # Device controls BEFORE the end-of-session marker.
+        if action == "set":
+            await send_frame(self.writer, FRAME_TIMER_SET,
+                             struct.pack("<I", min(seconds, 24 * 3600)))
+        elif action == "cancel":
+            await send_frame(self.writer, FRAME_TIMER_CANCEL)
+        await send_frame(self.writer, FRAME_REPLY_META, b"\x00")
+        self._mark("done")
+        await send_frame(self.writer, FRAME_PCM_DOWN_END)
 
     async def _handle_session_start(self) -> None:
         self.state = SessionState.INIT

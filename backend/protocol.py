@@ -11,6 +11,8 @@ FRAME_PCM_UP_END     = 0x02
 FRAME_PCM_DOWN       = 0x10
 FRAME_PCM_DOWN_END   = 0x11
 FRAME_REPLY_META     = 0x12  # 1-byte payload: 1 = LLM expects user reply, 0 = turn final
+FRAME_TIMER_SET      = 0x13  # 4-byte LE u32: countdown seconds; device displays + beeps
+FRAME_TIMER_CANCEL   = 0x14  # no payload: clear the device countdown
 FRAME_ERROR          = 0x20
 
 PROTO_VERSION = 0x01
