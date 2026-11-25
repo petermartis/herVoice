@@ -178,7 +178,7 @@ static void run_session(int sock, bool is_followup)
 
     int16_t  pcm_buf[FRAME_SAMPLES];
     uint32_t session_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    bool     speech_started   = false;
+    bool     speech_started   = false;  /* VAD-crossed flag: log/UI only */
     bool     speech_ended     = false;
     uint32_t silence_start_ms = 0;
 
@@ -220,16 +220,13 @@ static void run_session(int sock, bool is_followup)
         }
         uint32_t rms = (uint32_t)sqrtf((float)(energy / got));
 
-        if (!speech_started) {
-            if (rms >= VAD_START_THR) {
-                speech_started = true;
-                silence_start_ms = 0;
-                if (is_followup) ui_set_state(UI_STATE_RECORDING);
-                ESP_LOGI(TAG, "VAD: speech start");
-            } else {
-                continue; /* Don't send pre-speech audio */
-            }
+        if (!speech_started && rms >= VAD_START_THR) {
+            speech_started = true;
+            if (is_followup) ui_set_state(UI_STATE_RECORDING);
+            ESP_LOGI(TAG, "VAD: speech start");
         }
+        /* NOTE: no pre-speech gating — the clip starts at session start so a
+         * quiet onset can never be lost (the 1500 RMS gate used to eat it). */
 
         /* Normalize only the audio sent to STT; keep VAD in the raw domain. */
         for (size_t i = 0; i < got; i++) {
@@ -245,9 +242,10 @@ static void run_session(int sock, bool is_followup)
             goto session_done;
         }
 
-        /* Check for end of speech */
+        /* Check for end of speech (min 3 s window so the user can start) */
         if (rms < VAD_STOP_THR) {
-            if (silence_start_ms == 0) silence_start_ms = now_ms;
+            if ((now_ms - session_start_ms) < 3000) silence_start_ms = 0;
+            else if (silence_start_ms == 0) silence_start_ms = now_ms;
             else if ((now_ms - silence_start_ms) >= (uint32_t)VAD_SILENCE_MS) {
                 speech_ended = true;
                 ESP_LOGI(TAG, "VAD: speech end (silence timeout)");
