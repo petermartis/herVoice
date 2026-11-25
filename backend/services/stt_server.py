@@ -130,17 +130,19 @@ class STTService:
         segs = list(segments)
         text = " ".join(s.text.strip() for s in segs).strip()
         confidence = 0.0
+        no_speech = 0.0
         if segs:
             confidence = sum(s.avg_logprob for s in segs) / len(segs)
+            no_speech = max(getattr(s, "no_speech_prob", 0.0) for s in segs)
             # Prompt-echo hallucinations: on long ambient/no-speech clips
             # Whisper recites its initial_prompt verbatim (the exact prompt
             # weather question "answered" twice from 9-10 s empty clips).
             # Real speech, even noisy, keeps avg_logprob well above -0.9.
-            if text and (confidence < -0.9 or info.no_speech_prob > 0.7):
+            if text and (confidence < -0.9 or no_speech > 0.7):
                 log.warning("hallucination rejected (logprob=%.2f no_speech=%.2f): %r",
-                            confidence, info.no_speech_prob, text[:70])
+                            confidence, no_speech, text[:70])
                 text = ""
-        return text, language, probs, info.duration, round(confidence, 3), round(float(info.no_speech_prob), 3)
+        return text, language, probs, info.duration, round(confidence, 3), round(no_speech, 3)
 
     def transcribe(self, audio: bytes, language: str | None, sample_rate: int = SAMPLE_RATE) -> dict:
         audio_f32 = self._to_mono_f32(audio, sample_rate)
