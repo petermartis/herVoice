@@ -289,8 +289,24 @@ class HermesLLM:
             # The gateway already holds the earlier turns of this conversation.
             messages = [messages[0]] + [m for m in messages[-1:] if m.get("role") == "user"]
         if messages and messages[-1].get("role") == "user":
-            messages[-1] = {**messages[-1],
-                            "content": messages[-1]["content"] + _VOICE_DIRECTIVE}
+            # Name the language explicitly: "reply in the language the user
+            # spoke" left a small model to GUESS it, and the Slovak-heavy
+            # conversation history won (English question -> Slovak answer).
+            if lang == "en":
+                messages[-1] = {**messages[-1],
+                                "content": _EN_HINT + messages[-1]["content"]
+                                + _VOICE_DIRECTIVE.replace(
+                                    "Reply in the language the user just spoke.",
+                                    "The user spoke ENGLISH: answer in English only.")}
+            elif lang == "sk":
+                messages[-1] = {**messages[-1],
+                                "content": _SK_HINT + messages[-1]["content"]
+                                + _VOICE_DIRECTIVE.replace(
+                                    "Reply in the language the user just spoke.",
+                                    "The user spoke SLOVAK: answer in Slovak only.")}
+            else:
+                messages[-1] = {**messages[-1],
+                                "content": messages[-1]["content"] + _VOICE_DIRECTIVE}
         emitted = False
         try:
             async for d in self.stream(messages, conversation_id):
