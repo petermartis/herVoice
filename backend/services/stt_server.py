@@ -43,6 +43,7 @@ _DOMAIN_PROMPTS = {
            "otvorená. Kto je dnes doma a kto je vonku? Vypni svetlá v "
            "obývačke a zhasni v kuchyni. Aká je teplota v spálni a koľko "
            "stupňov je vonku? Zamkni vchodové dvere a skontroluj garáž. "
+           "Nastav časovač na päť minút a zruš časovač. "
            "Povedz mi predpoveď počasia aj na zajtra, aké bude počasie "
            "v Bratislave, bude pršať alebo snežiť?"),
     "en": ("Check if the gate is closed and close the gate. The gate is open "
