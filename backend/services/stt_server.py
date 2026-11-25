@@ -143,6 +143,13 @@ class STTService:
                 log.warning("hallucination rejected (logprob=%.2f no_speech=%.2f): %r",
                             confidence, no_speech, text[:70])
                 text = ""
+            # Confident-short-phrase pass: a >=4 s clip that yields only a
+            # tiny phrase (a truncated-clip 'Ďakujem.' ghost answered a timer
+            # request) is a hallucination — real commands run >2 chars/sec.
+            if text and info.duration >= 4.0 and len(text.strip()) <= 12:
+                log.warning("hallucination rejected (only %r from %.1fs clip)",
+                            text[:70], info.duration)
+                text = ""
         return text, language, probs, info.duration, round(confidence, 3), round(no_speech, 3)
 
     def transcribe(self, audio: bytes, language: str | None, sample_rate: int = SAMPLE_RATE) -> dict:
